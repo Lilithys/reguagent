@@ -11,6 +11,7 @@ from tool_contracts import obj,string,choice,array,integer,validate
 from dataset_runtime import calculate_options, evaluate_option, deadline_status
 from exposure_esg import portfolio_fact_report
 from applicability import assess_requirement_applicability
+from evidence_intake import read_evidence_text, evaluate_closure
 
 FACT_ID='FACT-ESG-ENERGY-COVERAGE'
 SME_PRODUCT='PRD-SME-WORKING-CAPITAL'
@@ -61,6 +62,7 @@ class InvestigationTools:
         self.files=store.inputs(case_id);self.case=store.case(case_id)
         self.records=indexed_records(self.files);self.byref={r['reference_id']:r for r in self.records}
         self.observed={};self.fact_lookups=set();self.artifact_root=artifact_root or store.path.parent/'source_artifacts'
+        self.evidence_root=store.path.parent/'evidence_artifacts'
 
     def _observe(self,result):
         if isinstance(result,dict):
@@ -267,7 +269,7 @@ class InvestigationTools:
             note='Lowest cost or shortest delivery is not an approved recommendation; deferred requirements are not solved by this plan.'),
             deps,'draft')
 
-    def propose_action(self,plan_key,title,steps,target_date,accountable_role_id,dependency_note,reference_ids):
+    def propose_action(self,plan_key,title,steps,target_date,accountable_role_id,dependency_note,required_evidence,reference_ids):
         plan=self.store.get(self.case_id,'PlanVersion',plan_key)
         if not plan or plan['status']=='stale':raise ValueError('Plan is missing or stale; refresh it before proposing an action')
         if not reference_ids or set(reference_ids)-set(self.observed):
@@ -278,17 +280,46 @@ class InvestigationTools:
         date.fromisoformat(target_date)
         if date.fromisoformat(target_date)<date.fromisoformat(self.case['as_of_date']):
             raise ValueError('target_date is an internal remediation goal; it cannot be dated before the case as_of_date')
+        evidence_keys=[e['evidence_key'] for e in required_evidence]
+        if not required_evidence or len(set(evidence_keys))!=len(evidence_keys):
+            raise ValueError('required_evidence must be non-empty with unique evidence_key values')
         regulatory_due_date=plan['payload']['calculation'].get('selected_regulatory_due_date')
         payload=dict(plan_key=plan_key,title=title,steps=steps,accountable_role_id=accountable_role_id,
             target_date=target_date,regulatory_due_date=regulatory_due_date,
             regulatory_deadline_status=deadline_status(regulatory_due_date,self.case['as_of_date']) if regulatory_due_date else 'unknown',
             internal_target_status=deadline_status(target_date,self.case['as_of_date']),
             dependency_note=dependency_note,acceptance_status='proposed',
+            required_evidence=required_evidence,required_evidence_ids=evidence_keys,
             addresses_requirement_ids=plan['payload']['addresses_requirement_ids'],
             reference_ids=reference_ids,author_role=self.role,review_status='provisional',
             note='regulatory_due_date is sourced and immutable; target_date is an unapproved internal goal, never a replacement for it.')
         deps=['object:PlanVersion:'+plan_key]+[dep for r in reference_ids for dep in self.observed[r].get('depends_on',[])]
         return self.store.put(self.case_id,'Action',plan_key+'::action',payload,deps,'draft')
+
+    def read_evidence(self,evidence_key,offset=0):
+        result=read_evidence_text(self.store,self.case_id,evidence_key,self.evidence_root,offset)
+        result.update(reference_id='EVD-TEXT-'+digest(dict(evidence_key=evidence_key,offset=offset,sha=result['content_sha256']))[:20],
+            depends_on=['object:Evidence:'+evidence_key])
+        return self._observe(result)
+
+    def review_evidence(self,evidence_key,content_assessment,rationale,reference_ids):
+        if not reference_ids or set(reference_ids)-set(self.observed):
+            raise ValueError('Review must cite this evidence actually observed via read_evidence in this task')
+        if not any(self.observed[r].get('evidence_key')==evidence_key for r in reference_ids):
+            raise ValueError('reference_ids must include a read_evidence observation of this exact evidence_key')
+        evidence=self.store.get(self.case_id,'Evidence',evidence_key)
+        if not evidence or evidence['status']!='submitted':raise ValueError('Evidence is not in a submitted, undecided state')
+        deps=set(evidence['depends_on'])|{dep for r in reference_ids for dep in self.observed[r].get('depends_on',[])}
+        return self.store.put(self.case_id,'Evidence',evidence_key,dict(evidence['payload'],
+            content_assessment=content_assessment,content_rationale=rationale,assessed_by_role=self.role,
+            review_status='provisional'),sorted(deps),'submitted')
+
+    def check_closure(self,action_key):
+        result=evaluate_closure(self.store,self.case_id,action_key,self.evidence_root)
+        result.update(reference_id='CLOSURE-'+digest(dict(action_key=action_key,result=result))[:20],
+            depends_on=['object:Action:'+action_key],
+            note='Metadata/hash/review-flag gate only; a qualified human still judges substantive sufficiency and legal/ESG scope.')
+        return self._observe(result)
 
     def case_context(self):
         return dict(case=self.store.case(self.case_id),objects=[dict(kind=o['kind'],key=o['object_key'],version=o['version'],
@@ -311,11 +342,11 @@ class InvestigationTools:
         return self.store.apply_answer(self.case_id,fact_id,answer,request_key,question_version)
 
 
-COMMON={'case_context','search_records','get_record','resolve_reference','get_fact','record_finding'}
+COMMON={'case_context','search_records','get_record','resolve_reference','get_fact','record_finding','check_closure'}
 PERMISSIONS={
  'coordinator':COMMON|{'delegate','finish','request_question'},
  'regulatory_analyst':COMMON|{'source_citation','source_versions','source_text','applicability','finish'},
- 'bank_investigator':COMMON|{'walk_dependencies','portfolio_facts','energy_coverage','request_question','propose_mapping','finish'},
+ 'bank_investigator':COMMON|{'walk_dependencies','portfolio_facts','energy_coverage','request_question','propose_mapping','read_evidence','review_evidence','finish'},
  'response_planner':COMMON|{'compare_costs','walk_dependencies','energy_coverage','find_roles','propose_plan','propose_action','finish'},
 }
 SCHEMAS={
@@ -342,7 +373,15 @@ SCHEMAS={
       reference_ids=array(string(180),1,6),population_count=integer(0,10_000_000)),
       ['option_id','requirement_ids','rationale','reference_ids']),
  'propose_action':obj(dict(plan_key=string(150),title=string(300),steps=string(3000),target_date=string(10),
-      accountable_role_id=string(100),dependency_note=string(1000),reference_ids=array(string(180),1,6))),
+      accountable_role_id=string(100),dependency_note=string(1000),
+      required_evidence=array(obj(dict(evidence_key=string(80),evidence_type=string(120),title=string(300)),
+          ['evidence_key','evidence_type','title']),1,4),
+      reference_ids=array(string(180),1,6))),
+ 'read_evidence':obj(dict(evidence_key=string(150),offset=integer(0,2_000_000)),['evidence_key']),
+ 'review_evidence':obj(dict(evidence_key=string(150),
+      content_assessment=choice('plausibly_responsive','unrelated_content','wrong_evidence_type','insufficient_detail'),
+      rationale=string(2000),reference_ids=array(string(180),1,4))),
+ 'check_closure':obj(dict(action_key=string(150))),
  'delegate':obj(dict(role=choice('regulatory_analyst','bank_investigator','response_planner'),task=string(2500),task_key=string(150))),
  'finish':obj(dict(status=choice('completed','waiting','needs_review'),summary=string(4000))),
 }
@@ -355,7 +394,10 @@ DESCRIPTIONS={
  'propose_mapping':'Persist a provisional semantic relationship using observed requirement and control text, without modifying baseline links.',
  'find_roles':'Look up the standing RACI-accountable role(s) for an organisational process; does not check current capacity or allocation.',
  'propose_plan':'Draft a provisional plan scoped to a subset of a response-option templates own requirement_ids, computed from real cost numbers; not an approved recommendation.',
- 'propose_action':'Draft a provisional action from a non-stale plan, with an accountable role grounded in an observed find_roles result; requires separate human acceptance.',
+ 'propose_action':'Draft a provisional action from a non-stale plan, with an accountable role grounded in an observed find_roles result and its own closure evidence requirements; requires separate human acceptance.',
+ 'read_evidence':'Read a bounded, hash-verified segment of a submitted evidence artefact; call before judging its content.',
+ 'review_evidence':'Persist a provisional content judgment (plausibly responsive / unrelated / wrong type / insufficient) on evidence actually read in this task; never itself a completeness gate or approval.',
+ 'check_closure':'Recompute the deterministic evidence-completeness gate for an action from current records; metadata/hash/review-flag only, not a substantive or legal sufficiency judgment.',
  'request_question':'Open the scoped energy-data question only after fact lookup; unresolved facts do not automatically block unrelated work.',
  'delegate':'Delegate a bounded task to a specialist and observe its actual tool-backed result; choose role and next step based on current needs.',
  'finish':'Return this investigation task as completed/waiting/needs_review. Never approves legal compliance or closes an action.',

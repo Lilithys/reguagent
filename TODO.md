@@ -98,11 +98,11 @@
   按职责、流程归属和 RACI 提出有理由的 owner/A/R，由人确认或修改。任务具备步骤、内部目标、原法规日期、依赖、交付接受和验收条件；分开负责人额度与交付团队产能，避免资源重复承诺。
   **验收：** 至少一个任务完成指派和接受；已过的法规日期不被改写；能区分当前逾期与补救目标能否达到。
 
-- [ ] **T19 — 实现证据提交与内容检查。**
+- [x] **T19 — 实现证据提交与内容检查。**
   保存文件、hash、类型、scope、任务归属和时间；银行调查角色在新的证据审查任务中检查内容，调用任务专属覆盖/测试工具。内容判断、完整性 gate 和人工批准分开。
   **验收：** 无关政策、缺测试文件和伪 ID 均不能结案；不合格证据有具体缺项解释；完整模拟证据能进入窄任务的人工审核。
 
-- [ ] **T20 — 实现批准、执行、返工与结案状态机。**
+- [x] **T20 — 实现批准、执行、返工与结案状态机。**
   明确定义 draft、待责任接受、执行中、证据提交、测试/审核、已验证等状态及退回路径。批准绑定具体方案/证据版本，检查责任、期限、依赖和证据；关键变更使旧批准失效，状态写入与审计一致。
   **验收：** 拒绝不会通过，重复请求不重复指派/关闭；窄任务闭环不等于全部 ESG 要求或法律合规获批。
 
@@ -158,3 +158,5 @@
 M1（T01–T06）完成。73 项 agent 测试、14 项 runtime/重建测试及两套数据校验通过；离线开发评测 12 通过、2 跳过。真实 LLM 调用为 0，不计作 T24。详见 [M1 实施报告](research/m1_implementation_2026-09-12.md) 与 [文字架构](docs/architecture.md)。T23 的 M1 反例已加入，其余访谈、重规划、重启和状态机测试随对应能力实现。下一批进入来源/材料准备及 M2 案件与工具运行基础。
 
 M2（T09–T14、T16）与 M3（T15、T17–T18）完成，此前漏勾选一并补上。`agent/case_store.py`/`tool_runtime.py`/`investigation_tools.py` 落实持久化案件对象、受权限与预算约束的工具循环、四角色协作与业务访谈-答复-选择性失效-重算-恢复；`dataset_runtime.evaluate_option` 把成本工具参数化为 scope/population/budget（`calculate_options` 保留为回归基线，逐位数值不变）；新增 `find_roles`/`propose_plan`/`propose_action`（响应规划角色）与人工专属 `accept_action`（刻意不经 `InvestigationTools`/`PERMISSIONS` 暴露给任何 LLM 角色）。`agent/test_m1_boundaries.py`+`test_m2_investigation.py`+`test_m3_planning.py` 共 75 项、`scripts/` 24 项测试及离线评测 12 通过/2 跳过全部通过；`agent/run_case.py demo-replay` 后接新增的 `accept` 子命令，已用真实 CLI 调用跑通一次方案起草→任务指派→人工接受的完整链路（含法规到期日期已逾期、内部目标日期仍在未来的正确区分）。真实 LLM 调用仍为 0，T24 未开始。下一批建议 T19–T20（证据与结案状态机），T07–T08 的来源/材料仍待补齐。
+
+M4（T19–T20）完成。新增 `agent/evidence_intake.py`：`submit_evidence`（人工/服务端提交，校验 evidence_slot 属于该 action 自己声明的 `required_evidence`、类型匹配、文件哈希，伪 ID 与类型不符均直接拒绝）、`evaluate_closure`（只读，把当前 Action/Evidence 翻译成 `dataset_runtime.closure_gate()` 需要的形状后原样调用，`closure_gate` 本身未改动一行）。`propose_action` 新增 `required_evidence` 参数，由响应规划角色在起草任务时一并声明具体证据类型。`investigation_tools.py` 新增银行调查角色工具 `read_evidence`/`review_evidence`（先读原文哈希校验的证据文本，再给出 plausibly_responsive/unrelated_content 等内容判断，绝不代表已收集、已人工复核或可结案）与全角色只读工具 `check_closure`。`case_store.py` 新增人工专属 `decide_evidence`（verified/rejected，拒绝不覆盖历史，可重新提交再判定）与 `close_action`（只有 `evaluate_closure` 判定 can_close 才允许结案，写入"仅此窄任务，非整条 ESG 要求或法律合规批准"的范围声明）——两者均刻意不经 `InvestigationTools`/`PERMISSIONS` 暴露。已验证结案后若证据被追溯打回，受影响 Action 会经既有 `_invalidate` 机制自动回到 stale（这一步排查中发现并修复了一个真实 bug：`close_action` 最初把依赖键写成短 slug 而不是完整的 `action_key::slot` 复合键，导致该失效机制形同虚设，测试 `test_verified_action_becomes_stale_if_evidence_is_later_rejected` 专门覆盖这条路径）。新增 `agent/test_m4_evidence.py` 35 项测试，全部针对真实校准数据；agent 全量 110 项、`scripts/` 24 项、离线评测 12 通过/2 跳过均通过。`agent/run_case.py` 新增 `submit-evidence`/`decide-evidence`/`close-action` 三个 CLI 子命令，`demo-replay` 已扩展为真实跑通"起草→接受→提交不合格证据→内容判断为不相关→人工拒绝→重新提交合格证据→内容判断为相关→人工确认→两项证据齐全→结案"的完整链路（`materials/esg_demo/` 新增 `unrelated_policy.synthetic.txt` 不合格样本与 `control_design.synthetic.txt`/`control_effectiveness_test.synthetic.txt` 合格样本，对应 T08 遗留的证据材料缺口）。下一批建议 T21–T22（前端/交互 API），T07–T08 的来源监测材料仍待补齐。

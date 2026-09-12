@@ -12,7 +12,7 @@ from datetime import datetime, timezone, date
 from pathlib import Path
 
 KINDS = {'Finding','Question','GapAssessment','PlanVersion','Action','Evidence','FactPatch','Task','SourceVersion'}
-STATUSES = {'draft','open','answered','running','completed','waiting','failed','stale','superseded','unverified','recorded','accepted'}
+STATUSES = {'draft','open','answered','running','completed','waiting','failed','stale','superseded','unverified','recorded','accepted','submitted','verified','rejected'}
 
 def utcnow():return datetime.now(timezone.utc).isoformat()
 def encode(value):return json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False)
@@ -136,6 +136,8 @@ class CaseStore:
             if kind=='SourceVersion':
                 self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
                 self._invalidate(case_id,{'source:'+payload.get('source_id','unknown')})
+            elif kind=='Evidence':
+                self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
             return result
 
     def set_status(self,case_id,status,reason):
@@ -195,8 +197,62 @@ class CaseStore:
                 raise ValueError('Only the proposed accountable role can accept this action')
             updated=self._put(case_id,'Action',action_key,dict(action['payload'],acceptance_status='accepted',
                 accepted_by_role_id=accepted_by_role_id,accepted_at=utcnow()),action['depends_on'],'accepted')
+            self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
             result=dict(action_id=updated['object_id'],status='accepted')
             self._audit(case_id,'action_accepted',dict(action_key=action_key,accepted_by=accepted_by_role_id),actor='human_input')
+            self.db.execute('INSERT INTO requests VALUES(?,?,?,?)',(case_id,request_key,request_hash,encode(result)))
+            return result
+
+    def decide_evidence(self,case_id,evidence_key,decision,decided_by_role_id,evidence_version,request_key):
+        """Human-only endpoint, mirrors accept_action -- never exposed through
+        InvestigationTools/PERMISSIONS. A rejected item is not deleted or overwritten;
+        it can be resubmitted (a new Evidence version) and re-decided later."""
+        if decision not in ('verified','rejected'):raise ValueError('decision must be verified or rejected')
+        if not request_key:raise ValueError('An idempotency request key is required')
+        request_hash=digest(dict(evidence_key=evidence_key,decision=decision,decided_by=decided_by_role_id,version=evidence_version))
+        with self.db:
+            prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
+            if prior:
+                if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different decision')
+                return json.loads(prior['result_json'])
+            evidence=self.get(case_id,'Evidence',evidence_key)
+            if not evidence or evidence['version']!=evidence_version or evidence['status']!='submitted':
+                raise ValueError('Evidence is not submitted and pending decision at the submitted version')
+            updated=self._put(case_id,'Evidence',evidence_key,dict(evidence['payload'],human_decision=decision,
+                decided_by_role_id=decided_by_role_id,decided_at=utcnow()),evidence['depends_on'],decision)
+            self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
+            invalidated=self._invalidate(case_id,{'object:Evidence:'+evidence_key}) if decision=='rejected' else []
+            result=dict(evidence_id=updated['object_id'],status=decision,invalidated_object_ids=invalidated)
+            self._audit(case_id,'evidence_decided',dict(evidence_key=evidence_key,decision=decision,
+                decided_by=decided_by_role_id,**result),actor='human_input')
+            self.db.execute('INSERT INTO requests VALUES(?,?,?,?)',(case_id,request_key,request_hash,encode(result)))
+            return result
+
+    def close_action(self,case_id,action_key,decided_by_role_id,action_version,request_key,artifact_root=None):
+        """Human-only endpoint. Refuses unless the fresh deterministic closure gate
+        (dataset_runtime.closure_gate, unmodified) already reports can_close; closing
+        a narrow task here is not an ESG-requirement-wide or legal compliance approval."""
+        if not request_key:raise ValueError('An idempotency request key is required')
+        request_hash=digest(dict(action_key=action_key,decided_by=decided_by_role_id,version=action_version))
+        with self.db:
+            prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
+            if prior:
+                if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different closure')
+                return json.loads(prior['result_json'])
+            action=self.get(case_id,'Action',action_key)
+            if not action or action['version']!=action_version or action['status']!='accepted':
+                raise ValueError('Action must be an accepted action at the submitted version')
+            from evidence_intake import evaluate_closure
+            gate=evaluate_closure(self,case_id,action_key,artifact_root)
+            if not gate['can_close']:raise ValueError('Evidence gate is not satisfied: '+'; '.join(gate['reasons']))
+            evidence_deps={'object:Evidence:'+action_key+'::'+slot for slot in action['payload'].get('required_evidence_ids',[])}
+            updated=self._put(case_id,'Action',action_key,dict(action['payload'],closure_status='verified',
+                closed_by_role_id=decided_by_role_id,closed_at=utcnow(),closure_gate=gate,
+                closure_scope_note='Closes only this narrow task; not an approval of the full ESG requirement or legal compliance.'),
+                sorted(set(action['depends_on'])|evidence_deps),'verified')
+            self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
+            result=dict(action_id=updated['object_id'],status='verified')
+            self._audit(case_id,'action_closed',dict(action_key=action_key,closed_by=decided_by_role_id),actor='human_input')
             self.db.execute('INSERT INTO requests VALUES(?,?,?,?)',(case_id,request_key,request_hash,encode(result)))
             return result
 

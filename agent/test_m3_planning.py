@@ -12,6 +12,9 @@ from investigation_tools import InvestigationTools, PERMISSIONS
 from dataset_runtime import evaluate_option, deadline_status
 from run_case import GOAL
 
+REQUIRED_EVIDENCE=[dict(evidence_key='design',evidence_type='control_design',title='Control design document'),
+                   dict(evidence_key='test',evidence_type='control_effectiveness_test',title='Effectiveness test result')]
+
 
 class BaseCase(unittest.TestCase):
     def setUp(self):
@@ -86,7 +89,7 @@ class ProposeActionTests(BaseCase):
 
     def test_action_grounds_owner_and_separates_regulatory_from_internal_dates(self):
         action=self.service.propose_action(self.plan['object_key'],'Stand up credit-monitoring control','Step 1...; Step 2...',
-            '2026-12-31','ROLE-CHIEF-RISK','Depends on data-gaps phase closing first',[self.roles['reference_id']])
+            '2026-12-31','ROLE-CHIEF-RISK','Depends on data-gaps phase closing first',REQUIRED_EVIDENCE,[self.roles['reference_id']])
         self.assertEqual(action['payload']['accountable_role_id'],'ROLE-CHIEF-RISK')
         self.assertEqual(action['payload']['acceptance_status'],'proposed')
         due=self.plan['payload']['calculation']['selected_regulatory_due_date']
@@ -98,26 +101,26 @@ class ProposeActionTests(BaseCase):
 
     def test_role_not_among_observed_candidates_is_rejected(self):
         with self.assertRaises(ValueError):
-            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CIO','note',[self.roles['reference_id']])
+            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CIO','note',REQUIRED_EVIDENCE,[self.roles['reference_id']])
 
     def test_reference_ids_not_from_find_roles_do_not_ground_any_role(self):
         with self.assertRaises(ValueError):
-            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',[self.costs['reference_id']])
+            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,[self.costs['reference_id']])
 
     def test_unobserved_reference_ids_are_rejected(self):
         with self.assertRaises(ValueError):
-            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',['FAKE'])
+            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,['FAKE'])
 
     def test_action_requires_an_existing_non_stale_plan(self):
         with self.assertRaises(ValueError):
-            self.service.propose_action('does-not-exist','Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',[self.roles['reference_id']])
+            self.service.propose_action('does-not-exist','Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,[self.roles['reference_id']])
         self.store.put(self.case_id,'PlanVersion',self.plan['object_key'],self.plan['payload'],self.plan['depends_on'],'stale')
         with self.assertRaises(ValueError):
-            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',[self.roles['reference_id']])
+            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-12-31','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,[self.roles['reference_id']])
 
     def test_target_date_before_case_as_of_date_is_rejected(self):
         with self.assertRaises(ValueError):
-            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-01-01','ROLE-CHIEF-RISK','note',[self.roles['reference_id']])
+            self.service.propose_action(self.plan['object_key'],'Title','Steps','2026-01-01','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,[self.roles['reference_id']])
 
 
 class AcceptActionTests(BaseCase):
@@ -126,7 +129,7 @@ class AcceptActionTests(BaseCase):
         costs=self.service.compare_costs()
         plan=self.service.propose_plan('OPT-ESG-AUTOMATED',['REQ-ESG-CREDIT-MONITORING-001'],'Credit monitoring phase',[costs['reference_id']])
         roles=self.service.find_roles('PROC-CREDIT-RISK-MONITORING')
-        self.action=self.service.propose_action(plan['object_key'],'Stand up control','Steps','2026-12-31','ROLE-CHIEF-RISK','note',[roles['reference_id']])
+        self.action=self.service.propose_action(plan['object_key'],'Stand up control','Steps','2026-12-31','ROLE-CHIEF-RISK','note',REQUIRED_EVIDENCE,[roles['reference_id']])
 
     def test_not_reachable_through_investigation_tools_or_any_role_permission(self):
         self.assertFalse(hasattr(InvestigationTools,'accept_action'))

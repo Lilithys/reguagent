@@ -4,6 +4,7 @@ It emits real tool-use messages and branches on real tool observations so tests
 exercise the same persistence/permissions/answer path as live model calls.
 """
 import json
+import re
 import uuid
 
 
@@ -49,6 +50,11 @@ class ReplayClient:
             return call('delegate',role='bank_investigator',task_key='energy-refresh',task='Recompute energy-data completeness after the attributed owner answer; preserve unrelated source and cost findings.')
         if 'conditional-costs' not in current:
             return call('delegate',role='response_planner',task_key='conditional-costs',task='Compare existing scoped cost templates while any data question remains unresolved. Do not approve a recommendation.')
+        unassessed=[o for o in last[2]['objects'] if o['kind']=='Evidence' and o['payload'].get('content_assessment') is None]
+        if unassessed:
+            target=unassessed[0]
+            return call('delegate',role='bank_investigator',task_key='evidence-review:'+target['key'],
+                task=f"Review submitted evidence {target['key']}; read its actual text before judging content relevance and type match.")
         waiting=any(o['kind']=='Question' and o['status']=='open' for o in last[2]['objects'])
         return call('finish',status='waiting' if waiting else 'completed',
             summary=('调查及条件性成本已保存；等待明确分母的能源数据答复。' if waiting else
@@ -70,6 +76,19 @@ class ReplayClient:
 
     def bank(self,seen,task):
         names=[name for name,_,_ in seen];results={name:result for name,_,result in seen}
+        review_match=re.match(r'Review submitted evidence (\S+);',task)
+        if review_match:
+            evidence_key=review_match.group(1)
+            if 'read_evidence' not in names:return call('read_evidence',evidence_key=evidence_key)
+            ev=results['read_evidence'];text=ev['text'].lower()
+            if 'review_evidence' not in names:
+                plausible='esg' in text and ('control' in text or 'test' in text or 'monitor' in text)
+                return call('review_evidence',evidence_key=evidence_key,
+                    content_assessment='plausibly_responsive' if plausible else 'unrelated_content',
+                    rationale=('文本提及ESG存量监测控制/测试相关内容，与该证据类型声明相符。' if plausible else
+                               '文本未提及ESG、控制或监测，疑似与声明的证据类型无关。'),
+                    reference_ids=[ev['reference_id']])
+            return call('finish',status='completed',summary='已读取并给出证据内容判断；最终认定与结案仍需人工决定。')
         refresh=task.startswith('Recompute')
         if not refresh:
             if not seen:return call('get_record',record_id='REQ-ESG-CREDIT-MONITORING-001')
@@ -116,6 +135,8 @@ class ReplayClient:
                 target_date=plan['payload']['calculation']['projected_delivery_date'],
                 accountable_role_id=roles['candidates'][0]['role_id'],
                 dependency_note='依赖治理映射审核结论（per-application控制不能直接证明存量监测）先确认，避免重复计入同一控制的覆盖范围。',
+                required_evidence=[dict(evidence_key='design',evidence_type='control_design',title='存量自动化ESG监测控制设计文档'),
+                                    dict(evidence_key='test',evidence_type='control_effectiveness_test',title='控制有效性测试结果')],
                 reference_ids=[roles['reference_id']])
         return call('finish',status='completed',
             summary='条件性经济比较、按存量ESG监测要求单独提出的分阶段方案与责任指派（草案）已保存；责任接受、执行与证据审核仍需人工在调查之外确认，不构成已批准资源或最终整改承诺。')
