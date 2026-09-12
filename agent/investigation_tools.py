@@ -332,8 +332,27 @@ class InvestigationTools:
         return self._observe(result)
 
     def case_context(self):
-        return dict(case=self.store.case(self.case_id),objects=[dict(kind=o['kind'],key=o['object_key'],version=o['version'],
-            status=o['status'],payload=o['payload']) for o in self.store.objects(self.case_id) if o['kind']!='Task'])
+        case=self.store.case(self.case_id)
+        rows=self.store.objects(self.case_id)
+        objects=[dict(kind=o['kind'],key=o['object_key'],version=o['version'],status=o['status'],payload=o['payload']) for o in rows if o['kind']!='Task']
+        if self.role=='coordinator':
+            # Coordination needs deliverables and open issues, not every source or
+            # calculation repeated in its context. Specialists retain full reads.
+            case={k:case[k] for k in ('case_id','goal','mode','status','as_of_date','snapshot_dates','revision','dataset_version')}
+            for obj in objects:
+                p=obj['payload']
+                if obj['kind']=='SourceVersion':
+                    p={k:p[k] for k in ('source_id','intake_mode','identifier','authenticity_status','note') if k in p}
+                    change=obj['payload'].get('change',{})
+                    p['change']={k:change[k] for k in ('title','legal_status','requirement_ids') if k in change}
+                elif obj['kind']=='PlanVersion':
+                    p={k:p[k] for k in ('option_id','addresses_requirement_ids','deferred_requirement_ids','rationale','review_status') if k in p}
+                obj['payload']=p
+        tasks=[dict(task_id=o['object_key'],role=o['payload'].get('role'),task_key=o['payload'].get('task_key'),
+            status=o['status'],case_revision=o['payload'].get('case_revision'),
+            checkpoint_available=bool(o['payload'].get('checkpoint'))) for o in rows if o['kind']=='Task']
+        return dict(case=case,objects=objects,tasks=tasks,
+            note='Task checkpoints retain tool observations; current-revision interrupted delegations resume automatically. Findings remain provisional.')
 
     def answer_question(self,fact_id,answer,request_key,question_version):
         validate(answer,ANSWER_SCHEMA)
@@ -354,7 +373,7 @@ class InvestigationTools:
 
 COMMON={'case_context','search_records','get_record','resolve_reference','get_fact','record_finding','check_closure'}
 PERMISSIONS={
- 'coordinator':COMMON|{'delegate','finish','request_question'},
+ 'coordinator':{'case_context','delegate','finish','check_closure'},
  'regulatory_analyst':COMMON|{'source_citation','source_versions','source_text','applicability','finish'},
  'bank_investigator':COMMON|{'walk_dependencies','portfolio_facts','energy_coverage','request_question','propose_mapping','read_evidence','review_evidence','finish'},
  'response_planner':COMMON|{'compare_costs','walk_dependencies','energy_coverage','find_roles','propose_plan','propose_action','finish'},

@@ -216,7 +216,7 @@ class RuntimeTests(BaseCase):
         self.assertTrue(all(e['output']['error_type']=='PermissionError' for e in errors))
 
     def test_invalid_tool_input_is_returned_for_correction(self):
-        client=ScriptedClient([call('search_records',query='ESG',limit=True),call('finish',status='needs_review',summary='Input validation checked')])
+        client=ScriptedClient([call('delegate',role='invalid-role',task='test',task_key='test'),call('finish',status='needs_review',summary='Input validation checked')])
         result=ToolRunner(self.store,self.case_id,client).run()
         self.assertEqual(result['outcome']['status'],'needs_review')
         errors=[a for a in self.store.audit_events(self.case_id) if a['event_type']=='tool_result' and a['payload']['is_error']]
@@ -238,7 +238,7 @@ class RuntimeTests(BaseCase):
         self.assertTrue(self.store.objects(self.case_id,'Task'))
 
     def test_repeated_no_progress_calls_stop(self):
-        client=ScriptedClient([call('get_record',record_id='UNKNOWN')]*4)
+        client=ScriptedClient([call('case_context')]*4)
         result=ToolRunner(self.store,self.case_id,client).run()
         self.assertEqual(result['outcome']['error_type'],'BudgetExceeded')
         self.assertEqual(result['budget']['model_turn_attempts'],3)
@@ -279,7 +279,7 @@ class RuntimeTests(BaseCase):
                     self_outer.assertEqual(messages[-1]['content'][0]['tool_use_id'],messages[-2]['content'][0]['id'])
                 return super().generate(**kwargs)
         self_outer=self
-        result=ToolRunner(self.store,self.case_id,ProtocolClient([call('get_fact',fact_id=FACT_ID),call('finish',status='needs_review',summary='Protocol validated')])).run()
+        result=ToolRunner(self.store,self.case_id,ProtocolClient([call('case_context'),call('finish',status='needs_review',summary='Protocol validated')])).run()
         self.assertEqual(result['outcome']['status'],'needs_review')
 
 

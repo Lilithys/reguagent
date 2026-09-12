@@ -1,7 +1,7 @@
 """Append-only case objects and atomic audit events in SQLite; baseline is frozen.
 
 Application services own writes. LLM tools never receive a DB connection or SQL.
-No approval or closure endpoint is implemented in this investigation milestone.
+Human approval and closure remain separate from the investigation tool permissions.
 """
 from __future__ import annotations
 import hashlib
@@ -10,6 +10,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone, date
 from pathlib import Path
+from contextlib import contextmanager
 
 KINDS = {'Finding','Question','GapAssessment','PlanVersion','Action','Evidence','FactPatch','Task','SourceVersion'}
 STATUSES = {'draft','open','answered','running','completed','waiting','failed','stale','superseded','unverified','recorded','accepted','submitted','verified','rejected'}
@@ -33,6 +34,7 @@ class CaseStore:
         # it only lifts sqlite3's default same-thread guard, not SQLite's own locking.
         self.db=sqlite3.connect(self.path,timeout=10,check_same_thread=False)
         self.db.row_factory=sqlite3.Row
+        self._transaction_depth=0
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('''
@@ -61,6 +63,28 @@ class CaseStore:
     def __enter__(self):return self
     def __exit__(self,*_):self.close()
 
+    @contextmanager
+    def transaction(self):
+        """Nested service writes can join a tool + audit + checkpoint commit."""
+        depth=self._transaction_depth
+        name='case_transaction_'+str(depth)
+        if depth==0:
+            if not self.db.in_transaction:self.db.execute('BEGIN')
+        else:self.db.execute('SAVEPOINT '+name)
+        self._transaction_depth+=1
+        try:
+            yield
+        except BaseException:
+            if depth==0:self.db.rollback()
+            else:
+                self.db.execute('ROLLBACK TO '+name)
+                self.db.execute('RELEASE '+name)
+            raise
+        else:
+            if depth==0:self.db.commit()
+            else:self.db.execute('RELEASE '+name)
+        finally:self._transaction_depth-=1
+
     def _audit(self,case_id,event_type,payload,actor='application'):
         previous=self.db.execute('SELECT event_hash FROM audit_events WHERE case_id=? ORDER BY seq DESC LIMIT 1',(case_id,)).fetchone()
         previous_hash=previous[0] if previous else ''
@@ -70,14 +94,14 @@ class CaseStore:
 
     def audit(self,case_id,event_type,payload,actor='application'):
         self.case(case_id)
-        with self.db:self._audit(case_id,event_type,payload,actor)
+        with self.transaction():self._audit(case_id,event_type,payload,actor)
 
     def create_case(self,goal,inputs,dataset_version,as_of_date,mode='live',intake_key=None):
         date.fromisoformat(as_of_date)
         if mode not in ('live','replay','test') or not goal.strip():raise ValueError('Invalid case mode/goal')
         frozen=encode(inputs);input_hash=digest(inputs)
         dates=sorted({r.get('snapshot_date',r.get('as_of_date','')) for r in inputs.get('03_exposure/lending_portfolio.csv',[]) }-{''})
-        with self.db:
+        with self.transaction():
             if intake_key:
                 existing=self.db.execute('SELECT * FROM cases WHERE intake_key=?',(intake_key,)).fetchone()
                 if existing:
@@ -135,7 +159,7 @@ class CaseStore:
 
     def put(self,case_id,kind,key,payload,deps=(),status='draft'):
         self.case(case_id)
-        with self.db:
+        with self.transaction():
             result=self._put(case_id,kind,key,payload,deps,status)
             if kind=='SourceVersion':
                 self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
@@ -147,7 +171,7 @@ class CaseStore:
     def set_status(self,case_id,status,reason):
         if status not in ('open','running','waiting_for_input','investigation_complete','needs_review','failed'):
             raise ValueError('No approval/closure state is available')
-        with self.db:
+        with self.transaction():
             self.case(case_id)
             self.db.execute('UPDATE cases SET status=?,updated_at=? WHERE case_id=?',(status,utcnow(),case_id))
             self._audit(case_id,'case_status',dict(status=status,reason=reason))
@@ -168,7 +192,7 @@ class CaseStore:
         """Validated service input only. Patch, answer, invalidation and audit commit together."""
         if not request_key:raise ValueError('An idempotency request key is required')
         request_hash=digest(dict(fact_id=fact_id,answer=answer,question_version=question_version))
-        with self.db:
+        with self.transaction():
             prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
             if prior:
                 if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with another answer')
@@ -189,7 +213,7 @@ class CaseStore:
         InvestigationTools/PERMISSIONS, so no LLM role can accept its own proposal."""
         if not request_key:raise ValueError('An idempotency request key is required')
         request_hash=digest(dict(action_key=action_key,accepted_by=accepted_by_role_id,version=action_version))
-        with self.db:
+        with self.transaction():
             prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
             if prior:
                 if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different acceptance')
@@ -214,7 +238,7 @@ class CaseStore:
         if decision not in ('verified','rejected'):raise ValueError('decision must be verified or rejected')
         if not request_key:raise ValueError('An idempotency request key is required')
         request_hash=digest(dict(evidence_key=evidence_key,decision=decision,decided_by=decided_by_role_id,version=evidence_version))
-        with self.db:
+        with self.transaction():
             prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
             if prior:
                 if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different decision')
@@ -238,7 +262,7 @@ class CaseStore:
         a narrow task here is not an ESG-requirement-wide or legal compliance approval."""
         if not request_key:raise ValueError('An idempotency request key is required')
         request_hash=digest(dict(action_key=action_key,decided_by=decided_by_role_id,version=action_version))
-        with self.db:
+        with self.transaction():
             prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
             if prior:
                 if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different closure')

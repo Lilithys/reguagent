@@ -43,16 +43,24 @@ LLM 选择调查路径、提出语义候选判断、追问、解释发现、组�
 
 ## 五、当前实施状态
 
-第一批 M1 完成 T01–T06：统一数据根目录与重建保护；拆分范围/日期/演示优先级/审核状态；修复 AHP 确认和版本绑定；按要求评价控制设计与操作证据；纠正治理链接和盲映射正文丢失；默认展示稳定分组的组合事实。
+本节是 2026-09-12 的最新状态，区分代码实现、本地验证和真实模型验收：
 
-M2 完成 T09–T14、T16：`agent/case_store.py` 用 SQLite 持久化 Case/Finding/Question/GapAssessment/PlanVersion/Action/Evidence 及哈希链审计事件；四个角色（案件协调、法规分析、银行调查、响应规划）共享同一个受权限、预算（`RunBudget`）与"已观察引用"约束的工具循环（`agent/tool_runtime.py`）；业务访谈—答复—事实补丁—选择性失效—重算链路可通过显式回放（`ReplayClient`）或真实模型运行并从中断处恢复。
+| 部分 | 已实现 | 仍待完成 |
+|---|---|---|
+| 基础 | 唯一 baseline、范围/日期拆分、控制设计/操作证据分离、可选 AHP | 来源材料及最终评测 |
+| 调查 | 四角色工具循环、权限、引用、问答、依赖失效、SQLite 审计 | 真实专家产出与完整调查验收 |
+| 计划 | 条件性成本、范围受限的方案/行动、RACI 候选、人工接受 | 案件预算约束贯通及重规划 |
+| 证据 | 文件/hash、内容判断、人工拒绝/确认、窄任务闭案 | 真实内容审查质量及 scope 完整性验证 |
+| 交互 | JSON API、视图及待办解析 | 实际前端、启动/恢复/约束等完整接口 |
+| 来源 | 登记事件回放、本地候选快照、文本比较 | 官方双版本及单一来源检测闭环 |
 
-M3 完成 T15、T18：响应规划 Agent 新增 `find_roles`（按 RACI 提出有理由的负责人候选，而非直接断言）、`propose_plan`（把响应模板范围收窄到本次实际调查涉及的具体要求，禁止声称覆盖模板未涉及的其余条款，成本数字始终来自 `evaluate_option` 而非模型自报）、`propose_action`（起草任务，负责人必须来自已观察的 `find_roles` 候选，内部目标日期与原法规到期日期分开记录各自的临近/逾期状态）。责任接受是单独的 `accept_action`，只存在于 `CaseStore`，刻意不通过 `InvestigationTools`/`PERMISSIONS` 暴露给任何 LLM 角色，需经 `agent/run_case.py accept` 由人工以匹配的角色显式调用。`demo-replay` 已完整跑通一次真实的方案起草—任务指派—人工接受全流程（`agent/test_m3_planning.py`）。
+本轮调整了两个运行机制：
 
-M4 完成 T19–T20：`agent/evidence_intake.py` 新增 `submit_evidence`（人工/服务端提交，校验证据槽位属于该 Action 自己声明的 `required_evidence`、类型匹配、文件哈希；不属于声明范围或类型不符的"伪ID"提交直接拒绝，不会写入案件）与 `evaluate_closure`（只读，把当前 Action/Evidence 翻译为 `dataset_runtime.closure_gate()` 需要的形状后原样调用——`closure_gate` 本身完全未改动，继续复用已测试过的确定性判断）。`propose_action` 现在必须声明 `required_evidence`（每项证据的类型与用途），响应规划角色起草任务时一并给出。银行调查角色新增 `read_evidence`/`review_evidence`：先读取哈希校验过的证据原文，再给出 plausibly_responsive/unrelated_content 等内容判断——这只是一条provisional 的内容线索，既不代表已收集，也不代表人工已复核或可以结案，"无关文档"和"缺少测试文件"因此是两种不同、都会被挡住的失败路径。`CaseStore` 新增人工专属的 `decide_evidence`（verified/rejected；拒绝不删除历史，可重新提交再判定）与 `close_action`（只有确定性证据闸门判定 can_close 才允许结案，写入"仅此窄任务，不代表整条 ESG 要求或法律合规获得批准"的范围声明）——两者与 `accept_action` 一样，刻意不通过 `InvestigationTools`/`PERMISSIONS` 暴露给任何 LLM 角色。已结案的 Action 若之后证据被追溯打回，会经既有的依赖失效机制自动回到 stale。`agent/run_case.py` 的 `demo-replay` 已真实跑通"起草→接受→提交不合格证据→内容判断为无关→人工拒绝→重新提交合格证据→内容判断为相关→人工确认→两项证据齐全→结案"的完整链路。
+1. **职责和任务边界。** 协调角色只用 `case_context/delegate/check_closure/finish`，专业查询交给专家。具体问题、读取工具和任务顺序仍由模型选择。专家先保存有依据的交付物再声明完成；协调角色不能仅凭来源入库结束调查。
+2. **持久化调查进度。** `task_execution.py` 执行任务，`task_checkpoint.py` 保存工具历史、已观察引用、待执行游标和未完成委派。业务写入、审计与游标更新原子提交；子任务独立提交，父任务恢复可复用。模型调用和等待不持有数据库写事务。
 
-M5 完成 T21–T22：工作区里没有 Integration-Guide.md 提到的 `frontend_app`（T21 自己的验收就预见了这种情况），新增的 `agent/view_adapter.py`/`agent/api_server.py` 因此没有照搬那份基于旧五阶段 A/B/C/D 流水线的前端契约，而是直接基于当前 Case/Finding/Question/GapAssessment/PlanVersion/Action/Evidence 模型重新设计，只保留"待办按 section 分类、resolve 时服务端必须重新校验"这两条仍然适用的思路。`view_adapter.py` 提供只读投影（案件概览、调查摘要、方案/行动、含版本历史的证据、审计日志）和 `pending_queue`（把开放问题/待接受行动/待裁定证据/可结案行动统一列成带 `section`（fact/response/evidence/closure）标签的待办队列），`resolve_queue_item` 按 section 分发到 `answer_question`/`accept_action`/`decide_evidence`/`close_action`——全部复用既有、已测试过的方法，这一层不重复任何业务判断。`api_server.py` 是纯标准库 `http.server`（单线程 `HTTPServer`，不是 `ThreadingHTTPServer`：sqlite3 连接默认不能跨线程用，为此把 `case_store.py` 的连接加上了 `check_same_thread=False`，让服务端可以在与创建连接不同的线程里跑）。`agent/test_m5_interface.py` 19 项测试中有 5 项启动真实 HTTPServer 用 `urllib` 发真实请求，另外用 `curl` 起了一个真实 CLI 子进程验证过。
+检查点绑定案件 revision、冻结输入和角色合同。来源/业务输入或提示/工具合同变化时新建任务，已有业务发现仍按依赖关系失效。旧版没有检查点的任务不能逐步续跑。同一案件目前串行运行，单任务轮数和无进展计数不会因重启清零。
 
-LLM provider 从只支持 DeepSeek 扩展为可选 OpenAI：新增 `OpenAIToolClient`（`agent/llm.py`），把 OpenAI Chat Completions 的 tool_calls/finish_reason/usage 形状翻译成与 `AnthropicToolClient` 相同的归一化 text/tool_use block，`tool_runtime.py` 完全不用改。`LLM_PROVIDER` 环境变量选择 provider（默认 `anthropic`，覆盖 DeepSeek 这类兼容端点；设成 `openai` 才走新路径），`configure_llm.py --provider {deepseek,openai}`。已用假 key 真实打到 OpenAI 线上端点确认收到结构化 401（不是参数错误），但尚未用真实有效 key 验证过完整一轮。
+OpenAI/gpt-5 已通过真实文本和工具往返测试。用户授权新增预算后，本轮 **10 次请求全部成功、33746 tokens、428.588 秒**，实际专家委派与两次检查点续跑成功，无 provider/工具错误。但模型对过大的八要求委派仍只做读取，Finding 为 0；约 90% 时间在节流等待。补充运行时预算/交付提示后，额外一次真实请求也未产出 Finding。最新 **226 项本地测试通过**，含 12 项检查点/角色测试和 2 项预算反馈测试；这些结果不代表调查能力或完整四角色闭环已通过。
 
-T23–T25（重建回归评测、真实 LLM 端到端评测、最终演示收尾）尚未实现，T07–T08 的来源监测与最小补充材料仍待补齐，按 `TODO.md` 后续里程碑推进。
+T12、T17、T21、T22 已恢复为部分完成；T07/T08/T23/T24/T25 仍未完成。下一步优先使委派具备可校验的单一决策问题、目标范围、交付物及调查预算，并返回未完成工作，避免专家承担一个超出轮数上限的大任务。详见 [TODO](../TODO.md)、[检查点实现与验证](../research/task_checkpoints_2026-09-12.md) 和 [当前交接](../CODEX_CONTEXT.md)。显式 replay 的成功不等于真实 LLM 表现，也不代表法律合规获批。

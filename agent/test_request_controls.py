@@ -85,6 +85,38 @@ class ContextTests(unittest.TestCase):
 
 
 class RuntimeControlTests(BaseCase):
+    def test_request_exposes_budget_without_replacing_task_or_tool_observations(self):
+        captured=[]
+        class RecordingClient(ScriptedClient):
+            def generate(inner,**kwargs):
+                captured.append(kwargs)
+                return super().generate(**kwargs)
+        client=RecordingClient([call('case_context'),call('finish',status='needs_review',summary='Partial investigation')])
+        result=ToolRunner(self.store,self.case_id,client,RunBudget(max_model_calls=2)).run()
+        self.assertEqual(result['outcome']['status'],'needs_review')
+        self.assertIn('CURRENT EXECUTION BUDGET',captured[0]['system'])
+        self.assertIn('"model_attempts_remaining_at_preparation":1',captured[1]['system'])
+        self.assertIn('"task_turns_remaining":11',captured[1]['system'])
+        self.assertEqual(captured[1]['messages'][-1]['content'][0]['type'],'tool_result')
+        tasks=self.store.objects(self.case_id,'Task')
+        self.assertNotIn('CURRENT EXECUTION BUDGET',json.dumps(tasks[0]['payload']['checkpoint']['state']['messages']))
+        requests=[e['payload'] for e in self.store.audit_events(self.case_id) if e['event_type']=='model_request']
+        self.assertEqual(requests[-1]['execution_budget']['model_attempts_remaining_at_preparation'],1)
+
+    def test_budget_feedback_uses_resumed_task_progress(self):
+        ToolRunner(self.store,self.case_id,ScriptedClient([call('case_context')]),RunBudget(max_model_calls=1)).run()
+        captured=[]
+        class ResumedClient(ScriptedClient):
+            def generate(inner,**kwargs):
+                captured.append(kwargs)
+                return super().generate(**kwargs)
+        result=ToolRunner(self.store,self.case_id,ResumedClient([
+            call('finish',status='needs_review',summary='Resumed partial work')]),RunBudget(max_model_calls=3)).run()
+        self.assertEqual(result['outcome']['status'],'needs_review')
+        self.assertIn('"task_turns_remaining":11',captured[0]['system'])
+        self.assertIn('"model_attempts_remaining_at_preparation":3',captured[0]['system'])
+        self.assertEqual(len([e for e in self.store.audit_events(self.case_id) if e['event_type']=='task_resumed']),1)
+
     def test_no_retry_wait_after_call_budget_exhausted(self):
         runner=ToolRunner(self.store,self.case_id,ScriptedClient([ProviderError(headers={'retry-after':'24'})]),RunBudget(max_model_calls=1))
         with patch.object(runner,'_pause') as wait:result=runner.run()

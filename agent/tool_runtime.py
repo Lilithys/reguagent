@@ -1,14 +1,11 @@
 """Budgeted role-specific tool loop. Shared budget bounds nested specialist work."""
 from __future__ import annotations
-import json
 import time
 import random
 import math
 from dataclasses import dataclass,field
 from datetime import datetime
-from case_store import digest,uid,encode
-from investigation_tools import InvestigationTools,tool_definitions,PERMISSIONS,SCHEMAS
-from tool_contracts import validate
+from case_store import uid,encode
 from roles import system_prompt
 from request_controls import bounded_messages,error_diagnostic,RequestTooLarge,TokenWindow
 
@@ -88,10 +85,27 @@ class ToolRunner:
             time.sleep(max(0,min(1,end-time.monotonic())))
             self.budget.check()
 
-    def _invoke(self,role,messages,definitions):
+    def _invoke(self,role,messages,definitions,task_progress=None):
         # SDK retries remain disabled. One bounded retry; never immediately hammer
         # a throttled endpoint or retry quota/context errors unchanged.
-        system=system_prompt(role)
+        progress=task_progress or {}
+        feedback=dict(model_attempts_remaining_at_preparation=max(0,self.budget.max_model_calls-self.budget.model_calls),
+            seconds_remaining_at_preparation=max(0,round(self.budget.remaining_seconds(),1)),
+            task_turns_remaining=max(0,12-progress.get('turns',0)),
+            persisted_deliverables=progress.get('persisted_deliverables',0))
+        # Ephemeral run facts, not a replacement for the task or its checkpoint.
+        # Include them in input sizing without making the latest tool result an
+        # older observation that compression could silently discard.
+        system=system_prompt(role)+'\nCURRENT EXECUTION BUDGET (application): '+encode(feedback)+'''
+The budget includes this request, retries, waits and nested specialist work; it is
+an upper bound, not a promise of enough calls to finish every item. Work toward ONE
+useful persisted deliverable first. If existing observations support a limited
+provisional finding, save it now before broadening the search. State unsupported
+scope and remaining questions explicitly. Do not claim unperformed checks. When a
+large delegated task is only partly addressed, return needs_review with remaining
+work after saving the supported result; do not label the whole task completed.
+Keep new delegations to one decision question and one expected saved deliverable.
+'''
         request_cap=min(self.budget.max_request_tokens,self.budget.tokens_per_minute or self.budget.max_request_tokens)
         if request_cap<512:raise RequestTooLarge('Configured request/TPM budget is too small for this tool protocol.')
         max_output=min(self.budget.max_output_tokens,request_cap-256)
@@ -117,7 +131,8 @@ class ToolRunner:
             if self.client.mode=='live':self.token_window.record(start,reserved_tokens)
             self.store.audit(self.case_id,'model_request',dict(role=role,attempt=attempt+1,
                 estimated_input_tokens=estimated_input,output_token_cap=min(max_output,remaining_tokens),
-                request_token_cap=request_cap,tokens_per_minute=self.budget.tokens_per_minute),actor=role)
+                request_token_cap=request_cap,tokens_per_minute=self.budget.tokens_per_minute,
+                execution_budget=feedback),actor=role)
             try:
                 response=self.client.generate(role=role,system=system,messages=bounded,tools=definitions,
                     max_tokens=min(max_output,remaining_tokens),timeout=max(.1,min(35,self.budget.remaining_seconds())))
@@ -145,81 +160,8 @@ class ToolRunner:
             return response
 
     def _task(self,role,task,task_key,depth=0):
-        revision=self.store.case(self.case_id)['revision']
-        identity=digest(dict(role=role,task=task,key=task_key,revision=revision))
-        cached=self.store.get(self.case_id,'Task',identity)
-        if cached and cached['status']=='completed':return dict(cached['payload']['result'],reused=True)
-        if identity in self.active_tasks:raise ValueError('Duplicate active task')
-        self.active_tasks.add(identity)
-        service=InvestigationTools(self.store,self.case_id,role)
-        task_payload=dict(role=role,task=task,task_key=task_key,run_id=self.run_id,case_revision=revision)
-        self.store.put(self.case_id,'Task',identity,task_payload,status='running')
-        messages=[dict(role='user',content=encode(dict(task=task,case_id=self.case_id,case_revision=revision,
-            instruction='Inspect case_context and choose tools as needed. Return through finish.')))]
-        definitions=tool_definitions(role);repeated={};no_tool_turns=0;completion=None
-        try:
-            for _ in range(12):
-                response=self._invoke(role,messages,definitions)
-                content=response.get('content')
-                if not isinstance(content,list):raise ValueError('Malformed model content')
-                calls=[b for b in content if isinstance(b,dict) and b.get('type')=='tool_use']
-                if response.get('stop_reason') in ('refusal','max_tokens'):
-                    raise ValueError('Model refused or truncated this task; state is retained')
-                if not calls:
-                    no_tool_turns+=1
-                    if no_tool_turns>1:raise ValueError('No structured tool call after correction')
-                    messages.append(dict(role='assistant',content=content or 'No tool result supplied.'))
-                    messages.append(dict(role='user',content='Use an available investigation tool or finish with a structured status.'))
-                    continue
-                ids=[b.get('id') for b in calls]
-                if any(not isinstance(i,str) or not i for i in ids) or len(set(ids))!=len(ids):raise ValueError('Malformed/duplicate tool-use IDs')
-                messages.append(dict(role='assistant',content=content))
-                results=[]
-                for call in calls:
-                    self.budget.tool();name=call.get('name');arguments=call.get('input');error=False
-                    started=time.monotonic()
-                    try:
-                        if completion:raise ValueError('No tools may execute after finish in the same response')
-                        if name not in PERMISSIONS[role]:raise PermissionError('Tool is not permitted for this role')
-                        validate(arguments,SCHEMAS[name])
-                        progress=digest([(o['object_id'],o['status']) for o in self.store.objects(self.case_id) if o['kind']!='Task'])
-                        signature=digest(dict(tool=name,arguments=arguments,progress=progress))
-                        repeated[signature]=repeated.get(signature,0)+1
-                        if repeated[signature]>2:raise BudgetExceeded('Repeated identical tool request without progress')
-                        if name=='delegate':
-                            if depth!=0:raise PermissionError('Specialists cannot delegate')
-                            self.budget.delegate()
-                            output=self._task(arguments['role'],arguments['task'],arguments['task_key'],depth+1)
-                        elif name=='finish':
-                            if role=='coordinator' and arguments['status']=='completed':
-                                if any(q['status']=='open' for q in self.store.objects(self.case_id,'Question')):
-                                    raise ValueError('Open questions remain: finish waiting or continue independent work')
-                                if any(o['status']=='stale' for o in self.store.objects(self.case_id) if o['kind'] in ('Finding','GapAssessment')):
-                                    raise ValueError('Affected findings are stale; recompute or explicitly return needs_review')
-                            completion=dict(arguments,role=role,review_status='provisional')
-                            output=completion
-                        else:output=getattr(service,name)(**arguments)
-                    except BudgetExceeded:raise
-                    except (ValueError,KeyError,PermissionError,TypeError) as exc:
-                        error=True;output=dict(status='tool_error',error_type=type(exc).__name__,message=str(exc)[:600])
-                    encoded=encode(output)
-                    if len(encoded)>42000:
-                        output=dict(status='result_too_large',message='Narrow the search or read individual record IDs.',
-                            record_ids=[r.get('record_id') for r in output.get('results',[])],truncated=True)
-                        encoded=encode(output)
-                    self.store.audit(self.case_id,'tool_result',dict(role=role,task_id=identity,tool_call_id=call['id'],
-                        tool=name,arguments=arguments,output=output,is_error=error,elapsed_seconds=round(time.monotonic()-started,3)),actor=role)
-                    results.append(dict(type='tool_result',tool_use_id=call['id'],content=encoded,is_error=error))
-                messages.append(dict(role='user',content=results))
-                if completion:
-                    status='completed' if completion['status']=='completed' else 'waiting'
-                    self.store.put(self.case_id,'Task',identity,dict(task_payload,result=completion),status=status)
-                    return completion
-            raise BudgetExceeded('Specialist turn limit exhausted')
-        except Exception as exc:
-            self.store.put(self.case_id,'Task',identity,dict(task_payload,error_type=type(exc).__name__),status='failed')
-            raise
-        finally:self.active_tasks.discard(identity)
+        from task_execution import execute_task
+        return execute_task(self,role,task,task_key,depth)
 
     def run(self):
         self.store.set_status(self.case_id,'running','Investigation run started')

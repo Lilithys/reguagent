@@ -34,6 +34,13 @@ class ReplayClient:
         # test variables. This is not model memory or a live inference result.
         self._seen_results={}
 
+    def restore_observations(self,messages):
+        for message in messages:
+            if not isinstance(message.get('content'),list):continue
+            for block in message['content']:
+                if block.get('type')=='tool_result' and json.loads(block['content']).get('status')!='context_compacted':
+                    self._seen_results[block['tool_use_id']]=block['content']
+
     def generate(self,*,role,system,messages,tools,max_tokens,timeout):
         messages=copy.deepcopy(messages)
         for message in messages:
