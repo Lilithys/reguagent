@@ -1,0 +1,212 @@
+"""Append-only case objects and atomic audit events in SQLite; baseline is frozen.
+
+Application services own writes. LLM tools never receive a DB connection or SQL.
+No approval or closure endpoint is implemented in this investigation milestone.
+"""
+from __future__ import annotations
+import hashlib
+import json
+import sqlite3
+import uuid
+from datetime import datetime, timezone, date
+from pathlib import Path
+
+KINDS = {'Finding','Question','GapAssessment','PlanVersion','Action','Evidence','FactPatch','Task','SourceVersion'}
+STATUSES = {'draft','open','answered','running','completed','waiting','failed','stale','superseded','unverified','recorded','accepted'}
+
+def utcnow():return datetime.now(timezone.utc).isoformat()
+def encode(value):return json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False)
+def digest(value):return hashlib.sha256(encode(value).encode()).hexdigest()
+def uid(prefix):return prefix+'-'+uuid.uuid4().hex
+
+
+class CaseStore:
+    def __init__(self, path):
+        from project_paths import DATASET_ROOT, RAW_DATA_ROOT
+        self.path=Path(path).resolve()
+        if any(self.path.is_relative_to(root.resolve()) for root in (DATASET_ROOT, RAW_DATA_ROOT)):
+            raise ValueError('Runtime database must be outside baseline and raw data')
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        self.db=sqlite3.connect(self.path,timeout=10)
+        self.db.row_factory=sqlite3.Row
+        self.db.execute('PRAGMA foreign_keys=ON')
+        self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.executescript('''
+        CREATE TABLE IF NOT EXISTS cases(
+          case_id TEXT PRIMARY KEY, intake_key TEXT UNIQUE, goal TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode IN ('live','replay','test')),
+          status TEXT NOT NULL, as_of_date TEXT NOT NULL, snapshot_dates_json TEXT NOT NULL,
+          dataset_version TEXT NOT NULL, dataset_digest TEXT NOT NULL, inputs_json TEXT NOT NULL,
+          revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS objects(
+          object_id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(case_id),
+          kind TEXT NOT NULL, object_key TEXT NOT NULL, version INTEGER NOT NULL,
+          status TEXT NOT NULL, payload_json TEXT NOT NULL, deps_json TEXT NOT NULL,
+          input_revision INTEGER NOT NULL, created_at TEXT NOT NULL,
+          UNIQUE(case_id,kind,object_key,version));
+        CREATE TABLE IF NOT EXISTS audit_events(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(case_id),
+          event_type TEXT NOT NULL, actor TEXT NOT NULL, payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL, previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS requests(
+          case_id TEXT NOT NULL REFERENCES cases(case_id), request_key TEXT NOT NULL,
+          payload_hash TEXT NOT NULL, result_json TEXT NOT NULL, PRIMARY KEY(case_id,request_key));
+        ''')
+
+    def close(self):self.db.close()
+    def __enter__(self):return self
+    def __exit__(self,*_):self.close()
+
+    def _audit(self,case_id,event_type,payload,actor='application'):
+        previous=self.db.execute('SELECT event_hash FROM audit_events WHERE case_id=? ORDER BY seq DESC LIMIT 1',(case_id,)).fetchone()
+        previous_hash=previous[0] if previous else ''
+        now=utcnow();body=dict(case_id=case_id,event_type=event_type,actor=actor,payload=payload,created_at=now,previous_hash=previous_hash)
+        self.db.execute('INSERT INTO audit_events(case_id,event_type,actor,payload_json,created_at,previous_hash,event_hash) VALUES(?,?,?,?,?,?,?)',
+            (case_id,event_type,actor,encode(payload),now,previous_hash,digest(body)))
+
+    def audit(self,case_id,event_type,payload,actor='application'):
+        self.case(case_id)
+        with self.db:self._audit(case_id,event_type,payload,actor)
+
+    def create_case(self,goal,inputs,dataset_version,as_of_date,mode='live',intake_key=None):
+        date.fromisoformat(as_of_date)
+        if mode not in ('live','replay','test') or not goal.strip():raise ValueError('Invalid case mode/goal')
+        frozen=encode(inputs);input_hash=digest(inputs)
+        dates=sorted({r.get('snapshot_date',r.get('as_of_date','')) for r in inputs.get('03_exposure/lending_portfolio.csv',[]) }-{''})
+        with self.db:
+            if intake_key:
+                existing=self.db.execute('SELECT * FROM cases WHERE intake_key=?',(intake_key,)).fetchone()
+                if existing:
+                    if existing['dataset_digest']!=input_hash or existing['mode']!=mode or existing['goal']!=goal or existing['as_of_date']!=as_of_date:
+                        raise ValueError('Intake key already belongs to different case inputs')
+                    return existing['case_id'],False
+            case_id=uid('CASE');now=utcnow()
+            self.db.execute('INSERT INTO cases VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (case_id,intake_key,goal,mode,'open',as_of_date,encode(dates),dataset_version,input_hash,frozen,0,now,now))
+            self._audit(case_id,'case_created',dict(mode=mode,dataset_digest=input_hash,as_of_date=as_of_date))
+        return case_id,True
+
+    def case(self,case_id,include_inputs=False):
+        row=self.db.execute('SELECT * FROM cases WHERE case_id=?',(case_id,)).fetchone()
+        if row is None:raise KeyError('Unknown case')
+        result=dict(row);inputs=result.pop('inputs_json')
+        result['snapshot_dates']=json.loads(result.pop('snapshot_dates_json'))
+        if include_inputs:result['inputs']=json.loads(inputs)
+        return result
+
+    def inputs(self,case_id):
+        row=self.case(case_id,True)
+        if digest(row['inputs'])!=row['dataset_digest']:raise ValueError('Frozen case input hash mismatch')
+        return row['inputs']
+
+    @staticmethod
+    def _object(row):
+        result=dict(row);result['payload']=json.loads(result.pop('payload_json'));result['depends_on']=json.loads(result.pop('deps_json'))
+        return result
+
+    def objects(self,case_id,kind=None,current=True):
+        self.case(case_id)
+        sql='SELECT o.* FROM objects o WHERE o.case_id=?';args=[case_id]
+        if kind:sql+=' AND o.kind=?';args.append(kind)
+        if current:sql+=' AND o.version=(SELECT MAX(n.version) FROM objects n WHERE n.case_id=o.case_id AND n.kind=o.kind AND n.object_key=o.object_key)'
+        return [self._object(r) for r in self.db.execute(sql+' ORDER BY o.created_at,o.object_id',args)]
+
+    def get(self,case_id,kind,key):
+        row=self.db.execute('SELECT * FROM objects WHERE case_id=? AND kind=? AND object_key=? ORDER BY version DESC LIMIT 1',(case_id,kind,key)).fetchone()
+        return self._object(row) if row else None
+
+    def _put(self,case_id,kind,key,payload,deps,status):
+        if kind not in KINDS or status not in STATUSES or not isinstance(payload,dict) or not key:
+            raise ValueError('Invalid object contract')
+        if kind in ('Finding','GapAssessment','PlanVersion','Action','Evidence') and (
+                payload.get('human_review_status')=='approved' or payload.get('review_status') in ('approved','verified') or payload.get('can_close') is True):
+            raise ValueError('Investigation services cannot approve or close work')
+        current=self.get(case_id,kind,key)
+        version=current['version']+1 if current else 1
+        revision=self.case(case_id)['revision'];object_id=uid(kind.upper())
+        self.db.execute('INSERT INTO objects VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (object_id,case_id,kind,key,version,status,encode(payload),encode(sorted(set(deps))),revision,utcnow()))
+        self._audit(case_id,'object_version',dict(object_id=object_id,kind=kind,key=key,version=version,status=status))
+        return self.get(case_id,kind,key)
+
+    def put(self,case_id,kind,key,payload,deps=(),status='draft'):
+        self.case(case_id)
+        with self.db:
+            result=self._put(case_id,kind,key,payload,deps,status)
+            if kind=='SourceVersion':
+                self.db.execute('UPDATE cases SET revision=revision+1,updated_at=? WHERE case_id=?',(utcnow(),case_id))
+                self._invalidate(case_id,{'source:'+payload.get('source_id','unknown')})
+            return result
+
+    def set_status(self,case_id,status,reason):
+        if status not in ('open','running','waiting_for_input','investigation_complete','needs_review','failed'):
+            raise ValueError('No approval/closure state is available')
+        with self.db:
+            self.case(case_id)
+            self.db.execute('UPDATE cases SET status=?,updated_at=? WHERE case_id=?',(status,utcnow(),case_id))
+            self._audit(case_id,'case_status',dict(status=status,reason=reason))
+
+    def _invalidate(self,case_id,changed):
+        invalidated=[];current=self.objects(case_id)
+        while True:
+            affected=[o for o in current if o['kind'] in ('Finding','GapAssessment','PlanVersion','Action')
+                      and o['status'] not in ('stale','superseded') and o['object_id'] not in invalidated
+                      and changed.intersection(o['depends_on'])]
+            if not affected:break
+            for record in affected:
+                self._put(case_id,record['kind'],record['object_key'],record['payload'],record['depends_on'],'stale')
+                invalidated.append(record['object_id']);changed.add('object:'+record['kind']+':'+record['object_key'])
+        return invalidated
+
+    def apply_answer(self,case_id,fact_id,answer,request_key,question_version):
+        """Validated service input only. Patch, answer, invalidation and audit commit together."""
+        if not request_key:raise ValueError('An idempotency request key is required')
+        request_hash=digest(dict(fact_id=fact_id,answer=answer,question_version=question_version))
+        with self.db:
+            prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
+            if prior:
+                if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with another answer')
+                return json.loads(prior['result_json'])
+            question=self.get(case_id,'Question',fact_id)
+            if not question or question['version']!=question_version or question['status']!='open':raise ValueError('Question is not open at the submitted version')
+            self.db.execute('UPDATE cases SET revision=revision+1,status=?,updated_at=? WHERE case_id=?',('open',utcnow(),case_id))
+            patch=self._put(case_id,'FactPatch',fact_id,answer,['fact:'+fact_id],'recorded')
+            self._put(case_id,'Question',fact_id,dict(question['payload'],answer=answer),question['depends_on'],'answered')
+            invalidated=self._invalidate(case_id,{'fact:'+fact_id})
+            result=dict(fact_patch_id=patch['object_id'],revision=self.case(case_id)['revision'],invalidated_object_ids=invalidated)
+            self._audit(case_id,'fact_answered',dict(fact_id=fact_id,answer=answer,**result),actor='human_input' if not answer.get('synthetic') else 'replay_fixture')
+            self.db.execute('INSERT INTO requests VALUES(?,?,?,?)',(case_id,request_key,request_hash,encode(result)))
+            return result
+
+    def accept_action(self,case_id,action_key,accepted_by_role_id,request_key,action_version):
+        """Human-only endpoint, mirrors apply_answer -- never exposed through
+        InvestigationTools/PERMISSIONS, so no LLM role can accept its own proposal."""
+        if not request_key:raise ValueError('An idempotency request key is required')
+        request_hash=digest(dict(action_key=action_key,accepted_by=accepted_by_role_id,version=action_version))
+        with self.db:
+            prior=self.db.execute('SELECT * FROM requests WHERE case_id=? AND request_key=?',(case_id,request_key)).fetchone()
+            if prior:
+                if prior['payload_hash']!=request_hash:raise ValueError('Idempotency key reused with a different acceptance')
+                return json.loads(prior['result_json'])
+            action=self.get(case_id,'Action',action_key)
+            if not action or action['version']!=action_version or action['status']!='draft':
+                raise ValueError('Action is not in draft at the submitted version')
+            if accepted_by_role_id!=action['payload'].get('accountable_role_id'):
+                raise ValueError('Only the proposed accountable role can accept this action')
+            updated=self._put(case_id,'Action',action_key,dict(action['payload'],acceptance_status='accepted',
+                accepted_by_role_id=accepted_by_role_id,accepted_at=utcnow()),action['depends_on'],'accepted')
+            result=dict(action_id=updated['object_id'],status='accepted')
+            self._audit(case_id,'action_accepted',dict(action_key=action_key,accepted_by=accepted_by_role_id),actor='human_input')
+            self.db.execute('INSERT INTO requests VALUES(?,?,?,?)',(case_id,request_key,request_hash,encode(result)))
+            return result
+
+    def audit_events(self,case_id):
+        return [dict(r, payload=json.loads(r['payload_json'])) for r in self.db.execute('SELECT * FROM audit_events WHERE case_id=? ORDER BY seq',(case_id,))]
+
+    def verify_audit(self,case_id):
+        previous=''
+        for row in self.audit_events(case_id):
+            body={k:row[k] for k in ('case_id','event_type','actor','payload','created_at','previous_hash')}
+            if row['previous_hash']!=previous or digest(body)!=row['event_hash']:return False
+            previous=row['event_hash']
+        return True
