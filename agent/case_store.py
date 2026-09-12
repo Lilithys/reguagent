@@ -27,7 +27,11 @@ class CaseStore:
         if any(self.path.is_relative_to(root.resolve()) for root in (DATASET_ROOT, RAW_DATA_ROOT)):
             raise ValueError('Runtime database must be outside baseline and raw data')
         self.path.parent.mkdir(parents=True,exist_ok=True)
-        self.db=sqlite3.connect(self.path,timeout=10)
+        # check_same_thread=False: this store may be constructed in one thread and
+        # served from another (e.g. api_server.py's HTTPServer running in a background
+        # thread). Access is always sequential, never concurrent, so this is safe --
+        # it only lifts sqlite3's default same-thread guard, not SQLite's own locking.
+        self.db=sqlite3.connect(self.path,timeout=10,check_same_thread=False)
         self.db.row_factory=sqlite3.Row
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA journal_mode=WAL')

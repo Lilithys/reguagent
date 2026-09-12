@@ -5,7 +5,7 @@ import re
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from case_store import digest, utcnow
+from case_store import digest, utcnow, encode
 from source_intake import compare_versions, read_snapshot
 from tool_contracts import obj,string,choice,array,integer,validate
 from dataset_runtime import calculate_options, evaluate_option, deadline_status
@@ -75,17 +75,25 @@ class InvestigationTools:
         hits=[r for r in self.records if r['record_id']==record_id]
         return self._observe(dict(status='ok' if hits else 'not_found',results=copy.deepcopy(hits)))
 
-    def search_records(self,query,collection='all',limit=5):
+    def search_records(self,query,collection='all',limit=5,detail='summary'):
         words=set(re.findall(r'[a-z0-9]+',query.lower()))
         candidates=self.records if collection=='all' else [r for r in self.records if any(r['path'].startswith(p) for p in COLLECTIONS[collection])]
         hits=[]
         for row in candidates:
             # Governance body is retained; no pre-filled requirement links in index.
-            from case_store import encode
             body=encode(row['record']).lower();score=sum(1 for word in words if word in body)
             if score:hits.append((score,row))
         hits.sort(key=lambda item:(-item[0],item[1]['reference_id']))
-        return self._observe(dict(status='ok' if hits else 'not_found',results=[copy.deepcopy(r) for _,r in hits[:limit]],
+        rows=[copy.deepcopy(r) for _,r in hits[:limit]]
+        if detail=='summary':
+            for row in rows:
+                record=row.pop('record')
+                row['record']={k:v[:350] for k,v in record.items()
+                    if k in ('title','name','short_name','objective','frequency','requirement_text') and isinstance(v,str)}
+                row['excerpt']=encode(record)[:650]
+                row['view']='search_preview'
+                row['note']='Discovery excerpt only. Use get_record(record_id) for full text before assessing coverage.'
+        return self._observe(dict(status='ok' if hits else 'not_found',results=rows,
             total_matches=len(hits),truncated=len(hits)>limit,search_method='keyword_overlap',
             scope='Frozen case input, allowlisted collections only; not proof that all bank documents exist here.'))
 
@@ -223,6 +231,8 @@ class InvestigationTools:
         if not reference_ids or set(reference_ids)-set(self.observed):raise ValueError('Mapping must cite observed records')
         observed_ids={self.observed[r].get('record_id') for r in reference_ids}
         if requirement_id not in observed_ids or control_id not in observed_ids:raise ValueError('Read both requirement and control before proposing their relationship')
+        if any(self.observed[r].get('view')=='search_preview' for r in reference_ids):
+            raise ValueError('Search previews identify candidates only; get_record for full requirement/control text before mapping')
         if not any(r['record_id']==control_id and r['path']=='04_governance/controls.json' for r in self.records):raise ValueError('Unknown control')
         return self.store.put(self.case_id,'GapAssessment',requirement_id+'::'+control_id,
             dict(requirement_id=requirement_id,candidate_control_id=control_id,mapping_support=support,
@@ -351,7 +361,7 @@ PERMISSIONS={
 }
 SCHEMAS={
  'case_context':obj({}),
- 'search_records':obj(dict(query=string(300),collection=choice('all',*COLLECTIONS),limit=integer(1,8)),['query']),
+ 'search_records':obj(dict(query=string(300),collection=choice('all',*COLLECTIONS),limit=integer(1,8),detail=choice('summary','full')),['query']),
  'get_record':obj(dict(record_id=string(120))),
  'resolve_reference':obj(dict(reference_id=string(180))),
  'source_citation':obj(dict(citation_id=string(180))),
@@ -386,7 +396,7 @@ SCHEMAS={
  'finish':obj(dict(status=choice('completed','waiting','needs_review'),summary=string(4000))),
 }
 DESCRIPTIONS={
- 'search_records':'Search frozen allowlisted records by keywords. Governance pre-filled answer links are removed; read text and investigate.',
+ 'search_records':'Find candidate IDs and short excerpts (default detail=summary). Then get_record for selected full text; use detail=full only for a small targeted set. Pre-filled governance answer links are removed.',
  'source_citation':'Resolve a real citation ID to its curated text, locator and official URL; explicitly distinguish paraphrase from original.',
  'source_versions':'Compare locally registered source versions; return insufficient_source_snapshots when absent. Never invent prior law.',
  'source_text':'Read a bounded segment of a registered local source candidate, with hash and authenticity status.',

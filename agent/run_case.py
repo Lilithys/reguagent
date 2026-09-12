@@ -21,12 +21,12 @@ GOAL='Investigate the SME ESG credit-monitoring change, source limitations, gove
 def client_for(mode):
     if mode=='replay':return ReplayClient()
     if mode=='live':
-        from llm import AnthropicToolClient
-        return AnthropicToolClient()
+        from llm import live_client
+        return live_client()
     raise ValueError('Test cases cannot run through the public CLI')
 
 
-def run(store,case_id):return ToolRunner(store,case_id,client_for(store.case(case_id)['mode'])).run()
+def run(store,case_id,budget=None):return ToolRunner(store,case_id,client_for(store.case(case_id)['mode']),budget).run()
 
 
 def view(store,case_id,include_audit=False):
@@ -110,6 +110,12 @@ def demo_replay(store,answer_fixture=None):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db',type=Path,default=RUNS_ROOT/'cases.sqlite3')
+    parser.add_argument('--max-request-tokens',type=int,default=16000,help='Local estimated input + output cap; not a provider limit')
+    parser.add_argument('--max-output-tokens',type=int,default=2400)
+    parser.add_argument('--max-model-calls',type=int,default=36)
+    parser.add_argument('--max-seconds',type=float,default=180)
+    parser.add_argument('--min-request-interval',type=float,default=0,help='Seconds between live request starts across all roles')
+    parser.add_argument('--tokens-per-minute',type=int,default=0,help='Conservative 60-second request reservations for this case; 0 disables local TPM pacing')
     sub=parser.add_subparsers(dest='command',required=True)
     start=sub.add_parser('start');start.add_argument('--mode',choices=['live','replay'],default='live')
     start.add_argument('--goal',default=GOAL);start.add_argument('--new',action='store_true')
@@ -134,11 +140,14 @@ def main():
     demo=sub.add_parser('demo-replay');demo.add_argument('--answer-fixture',type=Path)
     source=sub.add_parser('import-source');source.add_argument('case_id');source.add_argument('--identifier',required=True);source.add_argument('--file',type=Path,required=True)
     args=parser.parse_args()
+    budget=RunBudget(max_request_tokens=args.max_request_tokens,max_output_tokens=args.max_output_tokens,
+        max_model_calls=args.max_model_calls,max_seconds=args.max_seconds,min_request_interval=args.min_request_interval,
+        tokens_per_minute=args.tokens_per_minute)
     with CaseStore(args.db) as store:
         if args.command=='start':
             case_id,created=open_registered_case(store,args.goal,args.mode,nonce=uid('CASE') if args.new else None)
-            result=dict(created=created,**run(store,case_id))
-        elif args.command=='resume':result=run(store,args.case_id)
+            result=dict(created=created,**run(store,case_id,budget))
+        elif args.command=='resume':result=run(store,args.case_id,budget)
         elif args.command=='show':result=view(store,args.case_id,args.audit)
         elif args.command=='answer':result=answer(store,args.case_id,args.file,args.request_key,args.question_version)
         elif args.command=='accept':result=accept(store,args.case_id,args.action_key,args.role,args.action_version,args.request_key)

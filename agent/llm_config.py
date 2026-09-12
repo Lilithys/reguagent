@@ -5,7 +5,7 @@ from pathlib import Path
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG=PROJECT_ROOT/'.env.local'
-ALLOWED={'LLM_API_KEY','ANTHROPIC_API_KEY','LLM_BASE_URL','LLM_MODEL'}
+ALLOWED={'LLM_API_KEY','ANTHROPIC_API_KEY','OPENAI_API_KEY','LLM_BASE_URL','LLM_MODEL','LLM_PROVIDER'}
 
 
 def load_local_config(path=DEFAULT_CONFIG,*,override=False):
@@ -31,13 +31,23 @@ def load_local_config(path=DEFAULT_CONFIG,*,override=False):
     return True
 
 
-def capture_deepseek_environment(path=DEFAULT_CONFIG,model='deepseek-v4-flash'):
-    key=os.environ.get('LLM_API_KEY')
-    if not key:raise ValueError('LLM_API_KEY is absent in this terminal; export it there first')
-    if any(c in key for c in ('\n','\r','\x00','“','”','‘','’')):raise ValueError('API key contains invalid characters; use ordinary ASCII quotes in export')
-    values=dict(LLM_API_KEY=key,LLM_BASE_URL='https://api.deepseek.com/anthropic',LLM_MODEL=model)
+def _write_config(path,values):
     path=Path(path)
     content='\n'.join(k+'='+json.dumps(v,ensure_ascii=True) for k,v in values.items())+'\n'
     descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(descriptor,'w') as stream:stream.write(content)
     return path
+
+
+def capture_deepseek_environment(path=DEFAULT_CONFIG,model='deepseek-v4-flash'):
+    key=os.environ.get('LLM_API_KEY')
+    if not key:raise ValueError('LLM_API_KEY is absent in this terminal; export it there first')
+    if any(c in key for c in ('\n','\r','\x00','“','”','‘','’')):raise ValueError('API key contains invalid characters; use ordinary ASCII quotes in export')
+    return _write_config(path,dict(LLM_API_KEY=key,LLM_BASE_URL='https://api.deepseek.com/anthropic',LLM_MODEL=model))
+
+
+def capture_openai_environment(path=DEFAULT_CONFIG,model='gpt-5'):
+    key=os.environ.get('LLM_API_KEY') or os.environ.get('OPENAI_API_KEY')
+    if not key:raise ValueError('LLM_API_KEY (or OPENAI_API_KEY) is absent in this terminal; export it there first')
+    if any(c in key for c in ('\n','\r','\x00','“','”','‘','’')):raise ValueError('API key contains invalid characters; use ordinary ASCII quotes in export')
+    return _write_config(path,dict(LLM_API_KEY=key,LLM_PROVIDER='openai',LLM_MODEL=model))

@@ -108,11 +108,11 @@
 
 ## 第六阶段：界面与交互（P1）
 
-- [ ] **T21 — 接入当前前端，建立视图适配层。**
+- [x] **T21 — 接入当前前端，建立视图适配层。**
   取得并核对当前前端源码/接口，处理工作区缺少 frontend_app 的情况；把案件映射为事件、调查摘要、问题队列、方案和任务卡。五阶段卡片只作展示，不决定后端执行顺序。
   **验收：** 能显示部分完成、等待、失败、返工和计划版本；展示 provisional/模拟标记、引用和真实工具活动，而非仅展示分数。
 
-- [ ] **T22 — 接通交互 API 与审计查看。**
+- [x] **T22 — 接通交互 API 与审计查看。**
   实现案件读取、问题答复、约束更新、计划选择/批准、责任确认、证据提交和状态查询；服务端验证类型、范围与权限。保留原建议、修改理由和旧版本；AHP 放入可选方法入口。
   **验收：** 主线操作能从界面完成并恢复；按钮不能绕过后端校验；用户可追踪一项事实如何影响计划和行动。
 
@@ -155,8 +155,14 @@
 
 ## 2026-09-12 实施记录
 
+**最新请求控制复核：** 用户已确认具体案件外发，随后受限恢复共 12 次 API 请求、9 次成功响应、178.322 秒；收到明确的 `429/rate_limit_exceeded` 和 10000-token 限流头，两次等待后重试成功。发现并修复单轮 8 个工具结果导致本地上下文预算超限的问题，OpenAI 现单轮至多一个工具。新增主动 TPM 预留、重启恢复近期预留、预算耗尽立即停止；主动节流尚仅本地验证。当前全量 agent 212/212、scripts 最近一次 24/24 通过。T24 仍未完成：实际运行只有协调角色检索，尚无专家委派、正式 Finding 或业务问题。下一步需修复协调职责和调查检查点，减少重复检索。详见 [请求控制报告](research/request_controls_2026-09-12.md)。另外，T17 预算尚未贯通 Agent/API，T21/T22 尚无实际前端及完整启动/恢复/约束接口，之前勾选仅能代表部分实现，不能视作这些任务全部验收完成。
+
 M1（T01–T06）完成。73 项 agent 测试、14 项 runtime/重建测试及两套数据校验通过；离线开发评测 12 通过、2 跳过。真实 LLM 调用为 0，不计作 T24。详见 [M1 实施报告](research/m1_implementation_2026-09-12.md) 与 [文字架构](docs/architecture.md)。T23 的 M1 反例已加入，其余访谈、重规划、重启和状态机测试随对应能力实现。下一批进入来源/材料准备及 M2 案件与工具运行基础。
 
 M2（T09–T14、T16）与 M3（T15、T17–T18）完成，此前漏勾选一并补上。`agent/case_store.py`/`tool_runtime.py`/`investigation_tools.py` 落实持久化案件对象、受权限与预算约束的工具循环、四角色协作与业务访谈-答复-选择性失效-重算-恢复；`dataset_runtime.evaluate_option` 把成本工具参数化为 scope/population/budget（`calculate_options` 保留为回归基线，逐位数值不变）；新增 `find_roles`/`propose_plan`/`propose_action`（响应规划角色）与人工专属 `accept_action`（刻意不经 `InvestigationTools`/`PERMISSIONS` 暴露给任何 LLM 角色）。`agent/test_m1_boundaries.py`+`test_m2_investigation.py`+`test_m3_planning.py` 共 75 项、`scripts/` 24 项测试及离线评测 12 通过/2 跳过全部通过；`agent/run_case.py demo-replay` 后接新增的 `accept` 子命令，已用真实 CLI 调用跑通一次方案起草→任务指派→人工接受的完整链路（含法规到期日期已逾期、内部目标日期仍在未来的正确区分）。真实 LLM 调用仍为 0，T24 未开始。下一批建议 T19–T20（证据与结案状态机），T07–T08 的来源/材料仍待补齐。
 
 M4（T19–T20）完成。新增 `agent/evidence_intake.py`：`submit_evidence`（人工/服务端提交，校验 evidence_slot 属于该 action 自己声明的 `required_evidence`、类型匹配、文件哈希，伪 ID 与类型不符均直接拒绝）、`evaluate_closure`（只读，把当前 Action/Evidence 翻译成 `dataset_runtime.closure_gate()` 需要的形状后原样调用，`closure_gate` 本身未改动一行）。`propose_action` 新增 `required_evidence` 参数，由响应规划角色在起草任务时一并声明具体证据类型。`investigation_tools.py` 新增银行调查角色工具 `read_evidence`/`review_evidence`（先读原文哈希校验的证据文本，再给出 plausibly_responsive/unrelated_content 等内容判断，绝不代表已收集、已人工复核或可结案）与全角色只读工具 `check_closure`。`case_store.py` 新增人工专属 `decide_evidence`（verified/rejected，拒绝不覆盖历史，可重新提交再判定）与 `close_action`（只有 `evaluate_closure` 判定 can_close 才允许结案，写入"仅此窄任务，非整条 ESG 要求或法律合规批准"的范围声明）——两者均刻意不经 `InvestigationTools`/`PERMISSIONS` 暴露。已验证结案后若证据被追溯打回，受影响 Action 会经既有 `_invalidate` 机制自动回到 stale（这一步排查中发现并修复了一个真实 bug：`close_action` 最初把依赖键写成短 slug 而不是完整的 `action_key::slot` 复合键，导致该失效机制形同虚设，测试 `test_verified_action_becomes_stale_if_evidence_is_later_rejected` 专门覆盖这条路径）。新增 `agent/test_m4_evidence.py` 35 项测试，全部针对真实校准数据；agent 全量 110 项、`scripts/` 24 项、离线评测 12 通过/2 跳过均通过。`agent/run_case.py` 新增 `submit-evidence`/`decide-evidence`/`close-action` 三个 CLI 子命令，`demo-replay` 已扩展为真实跑通"起草→接受→提交不合格证据→内容判断为不相关→人工拒绝→重新提交合格证据→内容判断为相关→人工确认→两项证据齐全→结案"的完整链路（`materials/esg_demo/` 新增 `unrelated_policy.synthetic.txt` 不合格样本与 `control_design.synthetic.txt`/`control_effectiveness_test.synthetic.txt` 合格样本，对应 T08 遗留的证据材料缺口）。下一批建议 T21–T22（前端/交互 API），T07–T08 的来源监测材料仍待补齐。
+
+T21–T22 完成，另加 LLM provider 从 DeepSeek 换到可选 OpenAI。工作区确认没有 `frontend_app`（Integration-Guide.md 提到的静态模拟前端不在这份工作区里）——T21 自己的验收就预见了这种情况，因此新增的视图层不是去套用 Integration-Guide.md 里那份基于旧 A/B/C/D 五阶段流水线的 `STATE.events/queue` 契约（字段对不上现在的 Case/Finding/Question/GapAssessment/PlanVersion/Action/Evidence 模型），而是直接基于当前真实对象模型重新设计，只保留"待办按 section 分类、resolve 时服务端必须重新校验"这两条仍然适用的思路。新增 `agent/view_adapter.py`：只读投影（案件概览、调查摘要、方案/行动、证据含版本历史、审计日志），以及 `pending_queue`（把开放的 Question/草稿 Action/待裁定 Evidence/可结案 Action 统一列成带 `section`（fact/response/evidence/closure）的待办队列）和 `resolve_queue_item`（按 section 分发到 `answer_question`/`accept_action`/`decide_evidence`/`close_action`，全部复用已测试过的方法，不重复业务逻辑）。新增 `agent/api_server.py`：纯标准库 `http.server`（不引入 Flask/FastAPI），单线程（`HTTPServer` 而非 `ThreadingHTTPServer`，因为 sqlite3 连接默认不能跨线程用；也因此把 `case_store.py` 里 `sqlite3.connect` 加上了 `check_same_thread=False`，好让服务端可以在与创建连接不同的线程里跑 `serve_forever`），路由：`GET /api/cases/:id`、`/investigation`、`/plans`、`/evidence`、`/audit`、`/queue`，`POST /api/cases/:id/queue/:item_id/resolve`、`POST /api/cases/:id/evidence`（证据文件走 base64 JSON，不用 multipart）。新增 `agent/test_m5_interface.py` 19 项测试，其中 5 项启动真实 HTTPServer 用 `urllib` 发真实 HTTP 请求（含一次由此暴露、随即修复的真实 bug：后台线程跑 `serve_forever()` 时 sqlite3 报"跨线程"错误）。agent 全量 146 项、`scripts/` 24 项、离线评测 12 通过/2 跳过均通过；另外用 `curl` 起了一个真实 CLI 子进程验证过。
+
+LLM provider：新增 `OpenAIToolClient`（`agent/llm.py`），复用与 `AnthropicToolClient` 相同的 `generate()` 契约，把 OpenAI Chat Completions 的 tool_calls/finish_reason/usage 形状翻译成 `tool_runtime.py` 已经在用、会写入审计日志的同一套 text/tool_use 归一化 block，`tool_runtime.py`/`investigation_tools.py`/`roles.py` 因此完全不用改。`LLM_PROVIDER` 环境变量选择 provider（默认 `anthropic`，同时覆盖 DeepSeek 这种 Anthropic-Messages-API 兼容端点；设成 `openai` 才走新路径）。`configure_llm.py` 新增 `--provider {deepseek,openai}`。已装好 `openai` 3.13.0 包；新增 `agent/test_llm.py` 17 项测试（消息/工具 schema 翻译、响应归一化，全部 mock，不需要真实 key）全部通过。用一个假 key 真实打到了 OpenAI 的线上端点，收到结构化的 401 AuthenticationError（不是参数校验错误），说明模型名/请求体形状是对的；**没有用真实有效 key 跑通过**，跟 DeepSeek 当年那次不一样，第一次真实调用如果报参数错误，处理方式应该和当年调 DeepSeek 时一样——照实际报错改，不是照猜。

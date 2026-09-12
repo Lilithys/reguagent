@@ -165,7 +165,7 @@ class SourceAndToolTests(BaseCase):
         self.assertEqual(self.store.get(self.case_id,'Finding','energy')['object_id'],energy['object_id'])
 
     def test_no_path_or_answer_leakage_and_governance_text_survives(self):
-        result=self.service.search_records('ESG sector credit','governance',8)
+        result=self.service.search_records('ESG sector credit','governance',8,detail='full')
         text=json.dumps(result)
         self.assertNotIn('requirement_ids',text);self.assertNotIn('current_coverage',text)
         self.assertNotIn('evaluation_ground_truth',text)

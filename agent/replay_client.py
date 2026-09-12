@@ -6,6 +6,7 @@ exercise the same persistence/permissions/answer path as live model calls.
 import json
 import re
 import uuid
+import copy
 
 
 def history(messages):
@@ -28,7 +29,21 @@ class ReplayClient:
     mode='replay'
     request_attempts=0
 
+    def __init__(self):
+        # Script fixtures keep their already-seen observations, analogous to local
+        # test variables. This is not model memory or a live inference result.
+        self._seen_results={}
+
     def generate(self,*,role,system,messages,tools,max_tokens,timeout):
+        messages=copy.deepcopy(messages)
+        for message in messages:
+            if not isinstance(message.get('content'),list):continue
+            for block in message['content']:
+                if block.get('type')!='tool_result':continue
+                key=block['tool_use_id']
+                if json.loads(block['content']).get('status')=='context_compacted':
+                    block['content']=self._seen_results.get(key,block['content'])
+                else:self._seen_results[key]=block['content']
         seen=history(messages)
         last=seen[-1] if seen else None
         if last and last[2].get('status')=='tool_error':raise ValueError('Replay hit a tool contract error: '+last[2]['message'])
@@ -92,7 +107,7 @@ class ReplayClient:
         refresh=task.startswith('Recompute')
         if not refresh:
             if not seen:return call('get_record',record_id='REQ-ESG-CREDIT-MONITORING-001')
-            if 'search_records' not in names:return call('search_records',query='ESG sector screen new lending',collection='governance',limit=6)
+            if 'search_records' not in names:return call('search_records',query='ESG sector screen new lending',collection='governance',limit=6,detail='full')
             req=results['get_record']['results'][0]
             candidates=[r for r in results['search_records']['results'] if r['path']=='04_governance/controls.json']
             if not candidates:raise ValueError('Replay fixture expects a governance control candidate; this is not a general semantic agent')

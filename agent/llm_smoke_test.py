@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Manual connectivity check -- needs a real key and network, so it's not part of
-the offline unittest suite. Run after setting ANTHROPIC_API_KEY (or LLM_API_KEY +
-LLM_BASE_URL for another provider, e.g. DeepSeek's Anthropic-compatible endpoint):
+the offline unittest suite. Run after configuring a provider, either via
+agent/configure_llm.py --from-env --provider {deepseek,openai} (writes .env.local),
+or by exporting variables directly in this terminal:
 
-  export LLM_API_KEY=sk-...
-  export LLM_BASE_URL=https://api.deepseek.com/anthropic
-  export LLM_MODEL=deepseek-flash   # check DeepSeek's current docs for the live name
+  # Anthropic, or any Anthropic-Messages-API-compatible endpoint (e.g. DeepSeek):
+  export ANTHROPIC_API_KEY=sk-...            # real Anthropic
+  # or: export LLM_API_KEY=... ; export LLM_BASE_URL=https://api.deepseek.com/anthropic ; export LLM_MODEL=deepseek-v4-flash
+
+  # OpenAI:
+  export LLM_PROVIDER=openai
+  export OPENAI_API_KEY=sk-...               # or LLM_API_KEY
+  export LLM_MODEL=gpt-5                     # check OpenAI's current docs for the live name
+
   .venv/bin/python agent/llm_smoke_test.py
 """
 import sys

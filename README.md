@@ -23,7 +23,23 @@
 .venv/bin/python agent/run_demo.py --review-ahp
 ```
 
-当前主入口仍是确定性基线，不是已完成的自主四角色系统。M1（T01–T06）已实施；案件持久化、动态工具调用、业务访谈恢复、约束重规划、证据状态机及前端按后续 TODO 推进。上述离线检查不能证明 LLM 的调查质量。
+上述 `run_demo.py` 是确定性基线入口。当前四角色工具运行入口为 `agent/run_case.py`，已有案件持久化、访谈恢复、方案/行动、证据状态机和 JSON API。预算约束贯通、实际前端、来源材料和真实模型端到端验收仍按 TODO 推进。离线检查和脚本 replay 不证明真实 LLM 的调查质量。
+
+## 真实调用的请求预算
+
+当前用户已配置 OpenAI/gpt-5。真实调用已验证工具往返和限流等待后的成功重试；服务端返回的 token 限流头为 10000，请求次数限流头为 50。完整四角色闭环尚未通过。
+
+```bash
+# 示例：恢复原案件；CASE_ID 替换为实际 ID，使用创建时同一个数据库
+# 会发送案件上下文至已配置 provider 并产生 API 使用量
+.venv/bin/python agent/run_case.py --db runs/esg_live.sqlite3 \
+  --max-request-tokens 10000 --tokens-per-minute 10000 --max-model-calls 12 \
+  --max-seconds 180 --min-request-interval 12 resume CASE_ID
+```
+
+`--max-request-tokens` 是包括系统提示、工具定义、历史和预留输出的本地估算上限，不是账户 TPM。`--tokens-per-minute` 对同一案件的请求按 60 秒窗口保守预留额度，重启时恢复最近请求记录；不计其他应用的调用，仍以服务端提示为准。`--min-request-interval` 另外控制所有角色的请求启动间隔。输出上限默认 2400，可通过 `--max-output-tokens` 配置；全部选项放在子命令之前。上述为短时调试预算，不能保证完成完整调查。
+
+搜索默认给出摘要，随后按记录 ID 读取全文；OpenAI 单轮至多一个工具调用。运行记录安全的错误分类、请求大小和等待时间，超过预算保留状态。用户已确认案件外发，受限恢复已执行；最新主动 TPM 预留通过本地测试，尚待真实验证。详见[请求控制修复与验证](research/request_controls_2026-09-12.md)。
 
 ## 数据与复现
 
