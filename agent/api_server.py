@@ -6,12 +6,8 @@ Every route re-validates by calling the same InvestigationTools/CaseStore method
 the CLI (run_case.py) uses -- a request cannot skip a check by only changing what
 the client sends, since the check lives in the shared method, not in this layer.
 
-Single-threaded (HTTPServer, not ThreadingHTTPServer) on purpose: sqlite3
-connections in this codebase are opened with check_same_thread's default (True),
-so one CaseStore instance is only safe to use from the thread that created it.
-This is a two-week prototype's interactive API, not a concurrent production
-service; a single persistent connection handling one request at a time is
-simpler and correct, where a thread pool would need a connection per thread.
+Single-threaded HTTPServer serializes access to the shared CaseStore connection.
+The loopback API is intended for a local review session.
 """
 import argparse
 import base64
@@ -40,6 +36,17 @@ ROUTES = [
     (re.compile(r'^/api/cases/(?P<case_id>[^/]+)/queue/(?P<item_id>.+)/resolve$'), 'POST', 'resolve'),
 ]
 
+MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def upload_filename(value):
+    """Keep uploads inside their temporary directory on POSIX and Windows."""
+    if (not isinstance(value,str) or not value.strip() or len(value)>180
+            or value in ('.','..') or any(c in value for c in '/\\:')
+            or any(ord(c)<32 for c in value)):
+        raise ValueError('filename must be a plain file name without path components')
+    return value
+
 
 class Handler(BaseHTTPRequestHandler):
     store = None
@@ -57,10 +64,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_json_body(self):
         length = int(self.headers.get('Content-Length', 0) or 0)
+        if length<0 or length>MAX_BODY_BYTES:raise ValueError('JSON body must be at most 2 MiB')
         if length == 0:return {}
         raw = self.rfile.read(length)
-        try:return json.loads(raw)
-        except json.JSONDecodeError:raise ValueError('Request body is not valid JSON')
+        try:body=json.loads(raw)
+        except (json.JSONDecodeError,UnicodeDecodeError):raise ValueError('Request body is not valid JSON') from None
+        if not isinstance(body,dict):raise ValueError('Request body must be a JSON object')
+        return body
 
     def _dispatch(self, method):
         path = urlparse(self.path).path
@@ -89,9 +99,11 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._read_json_body()
                 for field in ('action_key', 'evidence_slot', 'evidence_type', 'submitted_by_role_id', 'filename', 'content_base64'):
                     if field not in body:raise ValueError(f'Missing field: {field}')
+                    if not isinstance(body[field],str):raise ValueError(f'{field} must be a string')
+                filename=upload_filename(body['filename'])
                 raw = base64.b64decode(body['content_base64'], validate=True)
                 with tempfile.TemporaryDirectory() as tmp:
-                    path = Path(tmp) / body['filename']
+                    path = Path(tmp) / filename
                     path.write_bytes(raw)
                     submitted = view_adapter.submit_evidence_item(self.store, case_id, body['action_key'],
                         body['evidence_slot'], body['evidence_type'], path, body['submitted_by_role_id'], self.artifact_root)

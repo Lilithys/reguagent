@@ -1,6 +1,20 @@
 # Regulatory Change-to-Action：当前任务交接
 
-更新：2026-09-12。工作区：`/Users/yishanma/Desktop/reguagent`。本文件描述当前状态；旧交接记录保存在 `backups/2026-09-12-before-task-checkpoints/CODEX_CONTEXT.before.md`。
+更新：2026-09-21。工作区：`/Users/yishanma/Desktop/reguagent`。本文件描述开发状态，不进入提交压缩包。
+
+## 最新：提交版本整理（2026-09-21）
+
+用户要求面向提交/面试优化呈现。已将 README 与架构整理为产品能力、快速体验和系统设计；详细评估边界放入 `docs/development.md`，历史研发记录保留在工作区，不声称已验证真实模型全流程。
+
+- 新增 `scripts/demo.py`：一条命令运行完整 synthetic Replay，输出 Markdown 报告、summary/workflow/audit JSON 和案件数据库。它明确模拟人工步骤；无模型 API 调用。
+- 新增 `requirements.txt`、Makefile、GitHub checks 工作流，以及演示/数据/开发/验证说明和示例报告。固定使用当前已安装版本，Python 最低 3.12；CI 配置已提供，实际验证在本地完成。
+- 修复本地 API 的证据文件名越界、JSON 顶层类型和 2 MiB 请求体积校验；补充 3 项测试，修复测试 HTTPError 资源清理。
+- 新增 `scripts/package_submission.py` 与 2 项提交测试：允许清单打包、固定 ZIP 元数据、文件及压缩包 SHA-256；剔除凭据、运行数据库、虚拟环境、备份、开发交接和第三方 PDF；保留复现所需原始数据及校验脚本。
+- `make check PYTHON=.venv/bin/python` 已通过：Agent 229/229、scripts 26/26、数据检查 1256、严格治理校验 0 errors/0 warnings、完整 Replay 9 项流程检查。包测试验证解压后隔离导入、无 site-packages 的 demo；日志在 `runs/submission_validation/`。
+- 提交入口：`dist/regulatory-change-to-action.zip`；演示：`python3 scripts/demo.py`；报告：`runs/demo/report.md`。
+- 本轮没有使用余下 Live 预算，没有改模型调查逻辑、baseline 或既有 live 案件；下方 9 月 12 日的 Live 结果和 T12 任务粒度问题仍适用。
+
+以下为调查运行的历史交接。旧交接记录保存在 `backups/2026-09-12-before-task-checkpoints/CODEX_CONTEXT.before.md`。
 
 最高依据是 `require.md`。目标是虚构 Northstar 银行 SME ESG 案件的来源变化 → 调查/访谈 → 控制缺口 → 约束下计划 → 责任/期限 → 证据审核。bunq 仅作真实同业参考；A/B/C 与 Integration Guide 是设计参考。四角色共享模型和单进程，LLM 负责调查路径与候选解释，代码负责计算/校验/状态，人负责关键解释审核、责任接受和证据批准。
 

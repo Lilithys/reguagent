@@ -1,5 +1,7 @@
 # Regulatory Change-to-Action — 实施 TODO
 
+**2026-09-21 提交整理：** 新增一键完整 Replay、示例报告、依赖清单、Makefile、CI 配置和可校验源码包；README/架构改为面向评审的能力与操作说明。修复本地 API 上传边界。最新本地验证 229 项 Agent 测试、26 项脚本测试、1256 条数据检查通过，完整回放 9 项检查通过。T25 的提交材料与可复现入口已补齐；T12/T24 的真实调查交付仍按下方计划推进，未重新消耗 Live 预算。
+
 更新：2026-09-12。用户已接受 [架构与代码 Review](research/architecture_review_2026-09-11.md) 的方向。本清单替代旧 A/B/C/D 实施顺序；[旧 TODO](research/TODO_before_architecture_reset_2026-09-11.md) 仅作历史记录。
 
 最高依据为 [require.md](require.md)。本轮目标：**一个 SME ESG 案件的来源变化 → 调查 → 关键事实访谈 → 控制缺口 → 约束下重规划 → 责任人/期限 → 证据审核闭环。**

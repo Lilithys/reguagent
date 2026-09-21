@@ -185,6 +185,35 @@ class ApiServerTests(unittest.TestCase):
             data=b'not json',method='POST',headers={'Content-Type':'application/json'})
         with self.assertRaises(urllib.error.HTTPError) as ctx:urllib.request.urlopen(req)
         self.assertEqual(ctx.exception.code,400)
+        ctx.exception.close()
+
+    def test_non_object_json_is_rejected_and_server_remains_available(self):
+        for body in ([],None,'text',42):
+            with self.subTest(body=body):
+                status,_=self._post(f'/api/cases/{self.case_id}/evidence',body)
+                self.assertEqual(status,400)
+        self.assertEqual(self._get(f'/api/cases/{self.case_id}')[0],200)
+
+    def test_upload_path_traversal_and_invalid_types_do_not_write_files(self):
+        outside=Path(self.tmp.name,'escaped.txt')
+        body=dict(action_key='unused',evidence_slot='design',evidence_type='control_design',
+            submitted_by_role_id='ROLE-HEAD-CREDIT-RISK',content_base64='dGVzdA==')
+        for filename in (str(outside),'../escaped.txt','..\\escaped.txt','C:\\escaped.txt','.',None,'bad\x00.txt'):
+            with self.subTest(filename=filename):
+                status,_=self._post(f'/api/cases/{self.case_id}/evidence',dict(body,filename=filename))
+                self.assertEqual(status,400)
+        self.assertFalse(outside.exists())
+        self.assertEqual(self.server.case_store.objects(self.case_id,'Evidence'),[])
+
+    def test_oversized_body_is_rejected(self):
+        # A declared oversize must be rejected before reading the full upload.
+        request=urllib.request.Request(self._url(f'/api/cases/{self.case_id}/evidence'),
+            data=b'{}',method='POST',headers={'Content-Type':'application/json',
+                'Content-Length':str(api_server.MAX_BODY_BYTES+1)})
+        with self.assertRaises(urllib.error.HTTPError) as caught:urllib.request.urlopen(request)
+        with caught.exception as response:
+            self.assertEqual(response.code,400)
+            self.assertIn('2 MiB',json.loads(response.read())['message'])
 
     def test_submit_evidence_over_real_http_then_appears_in_evidence_view(self):
         _,queue=self._get(f'/api/cases/{self.case_id}/queue')

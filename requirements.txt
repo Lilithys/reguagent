@@ -1,0 +1,4 @@
+# Versions used for the submission validation. Python >= 3.12.
+numpy==2.5.3
+openai==3.13.0
+anthropic==1.4.0

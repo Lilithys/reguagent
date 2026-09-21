@@ -1,72 +1,139 @@
 # Regulatory Change-to-Action
 
-以 `require.md` 为最高要求，围绕虚构 Northstar 银行的 SME ESG 案件构建可追溯、有人审核的 multi-agent 演示。bunq 仅作真实同业参考。
+**将监管变化转化为可追溯、可分工、可审核的整改行动。**
 
-- [总体架构：文字描述](docs/architecture.md)
-- [实施 TODO 与进度](TODO.md)
-- [本轮 M1 实施与验证报告](research/m1_implementation_2026-09-12.md)
-- [架构与代码 Review](research/architecture_review_2026-09-11.md)
-- [同类产品、开源项目和公开数据集调研](research/market_landscape_2026-09-08.md)
-- [数据内容与运行方式](calibrated_v0_2/README.md)、[数据字典](calibrated_v0_2/DATA_DICTIONARY.md)
-- [来源审计与缺失证据](research/source_audit.md)
+一个面向银行合规与风险团队的多 Agent 决策支持原型。以 Northstar 数字银行的 SME ESG 信贷监测为场景，将法规来源、银行控制、业务访谈、响应方案和完成证据组织在同一个持久化案件中。
 
-## 当前可运行
+`Python` · `4 Agent roles` · `Tool calling` · `SQLite checkpoints` · `Human-in-the-loop`
 
-```bash
-# 离线基线检查；不会调用 LLM、选择方案或执行批准
-.venv/bin/python agent/run_demo.py --non-interactive
+## 项目解决什么问题
 
-# 交互式查看基线并选择方案草案；回车不选择
-.venv/bin/python agent/run_demo.py
+监管文件说明“应该做什么”，机构还需要回答：**影响哪些业务？现有控制能否覆盖？缺什么事实？由谁在何时完成？怎样证明已经完成？**
 
-# 可选方法审核：需要配置当前 LLM provider
-.venv/bin/python agent/run_demo.py --review-ahp
-```
+本项目围绕这些问题构建调查与行动闭环：
 
-上述 `run_demo.py` 是确定性基线入口。当前四角色工具运行入口为 `agent/run_case.py`，已有案件持久化、访谈恢复、方案/行动、证据状态机和 JSON API。预算约束贯通、实际前端、来源材料和真实模型端到端验收仍按 TODO 推进。离线检查和脚本 replay 不证明真实 LLM 的调查质量。
+| 能力 | 具体实现 |
+|---|---|
+| 来源与适用性 | 登记监管来源、导入版本快照、解析引用，区分适用范围和生效日期 |
+| 控制差异调查 | 检索政策与控制正文，保存有依据的候选映射和缺口 |
+| 业务访谈 | 对缺失事实生成带负责人、单位、分母和日期的问题 |
+| 响应规划 | 比较方案成本，起草限定范围的行动、责任候选、内部目标日及证据要求 |
+| 证据审核 | 文件 hash、内容判断、人工确认/退回、任务级结案检查 |
+| 可恢复执行 | 版本化案件、工具检查点、依赖失效更新及哈希链审计 |
 
-## 真实调用的请求预算
+## 一条命令体验完整案例
 
-当前用户已配置 OpenAI/gpt-5。真实调用已验证工具往返和限流等待后的成功重试；服务端返回的 token 限流头为 10000，请求次数限流头为 50。完整四角色闭环尚未通过。
+使用 Python 3.12+，在项目根目录运行：
 
 ```bash
-# 示例：恢复原案件；CASE_ID 替换为实际 ID，使用创建时同一个数据库
-# 会发送案件上下文至已配置 provider 并产生 API 使用量
-.venv/bin/python agent/run_case.py --db runs/esg_live.sqlite3 \
-  --max-request-tokens 10000 --tokens-per-minute 10000 --max-model-calls 12 \
-  --max-seconds 180 --min-request-interval 12 resume CASE_ID
+python3 scripts/demo.py
 ```
 
-`--max-request-tokens` 是包括系统提示、工具定义、历史和预留输出的本地估算上限，不是账户 TPM。`--tokens-per-minute` 对同一案件的请求按 60 秒窗口保守预留额度，重启时恢复最近请求记录；不计其他应用的调用，仍以服务端提示为准。`--min-request-interval` 另外控制所有角色的请求启动间隔。输出上限默认 2400，可通过 `--max-output-tokens` 配置；全部选项放在子命令之前。上述为短时调试预算，不能保证完成完整调查。
+默认演示使用**内置场景回放**，无需 API key 或第三方依赖。它执行与模型模式相同的业务工具和状态服务，并以明确标记的模拟答复与审核决定展示：
 
-搜索默认给出摘要，随后按记录 ID 读取全文；OpenAI 单轮至多一个工具调用。运行记录安全的错误分类、请求大小和等待时间，超过预算保留状态。用户已明确授权新增预算，本轮真实运行 **10 次请求全部成功**，实际专家委派、检查点续跑与 TPM 等待得到验证。但仍没有 Finding，任务范围和交付边界需要修复；约 90% 运行时间在等待，完整 demo 仍未通过。详见[请求控制修复与验证](research/request_controls_2026-09-12.md)及[任务检查点报告](research/task_checkpoints_2026-09-12.md)。
+1. 建立 ESG 案件，保存来源和候选适用范围。
+2. 识别“新申请筛查”与“存量持续监测”的控制范围差异。
+3. 提出能源数据问题，接收模拟答复，更新相关发现。
+4. 比较条件性成本，生成行动草案并模拟责任接受。
+5. 拒绝不相关证据，补交设计与测试材料，完成窄任务的审核与结案。
 
-## 专家委派与中断恢复
+结果写入 `runs/demo/`：
 
-协调角色查看案件、委派专家、汇总结果，由模型选择具体问题和调查顺序。专业查询与 Findings 由专家完成；专家不能只读资料却宣布完成。
+| 文件 | 用途 |
+|---|---|
+| `report.md` | 可直接阅读的案例报告 |
+| `summary.json` | 发现、方案、行动、证据及检查结果 |
+| `workflow.json` / `audit.json` | 执行阶段与审计事件 |
+| `cases.sqlite3` | 可继续查询的案件数据库 |
 
-`resume` 恢复同版本任务的工具观察、已读取引用及未完成委派，接着执行尚未完成的工具。业务写入与检查点原子提交，避免重启后重复保存结果。来源/事实 revision 或角色提示/工具合同变化时创建新任务；旧 Findings 的选择性失效仍按依赖关系处理。旧版没有检查点的任务不会被伪装为可逐步续跑。
+也可先阅读 [示例报告](examples/esg_demo_report.md) 或 [演示讲解](docs/demo.md)。
 
-本地全量 **226 项测试通过**，包含 12 项权限与中断恢复测试和 2 项运行时预算提示测试。模型可看到剩余预算及交付进度，但一次真实追加验证未产生 Finding，提示本身尚未解决大任务持续检索的问题。业务问答和完整证据闭环仍属待验收范围；脚本回放不能替代真实模型评测。当前只支持同一案件串行运行。
+## 系统架构
 
-## 数据与复现
+```mermaid
+flowchart LR
+    I[监管来源与银行数据] --> C[案件协调 Agent]
+    C --> R[法规分析 Agent]
+    C --> B[银行调查 Agent]
+    C --> P[响应规划 Agent]
+    R --> T[受权限约束的工具服务]
+    B --> T
+    P --> T
+    T <--> S[(版本化案件与检查点)]
+    S --> C
+    S --> H[人工答复、责任接受与证据审核]
+    H --> S
+```
 
-唯一 baseline 是根目录 `calibrated_v0_2/`，数据版本 `0.2.1`，场景和法律研究截止仍为 `2026-09-08`。原始 `data/person1` 至 `person4` 不变。方法记录在 `config/`，运行输出写入 `runs/`；不要把整个工作区递归送给模型。
+| Agent | 核心职责 |
+|---|---|
+| 案件协调 | 根据案件目标和当前状态分配调查任务、汇总结果 |
+| 法规分析 | 核对要求、引用、来源版本、候选范围和日期 |
+| 银行调查 | 调查控制、业务事实及依赖关系，审核证据内容 |
+| 响应规划 | 调用成本与角色工具，提出方案和行动草案 |
+
+采用 **Supervisor–Specialist** 协作方式：四个逻辑角色共用可配置模型，运行于单进程自定义 Python 编排层。角色通过结构化委派和共享案件状态协作，当前串行调度。模型负责调查选择与候选解释，代码负责计算和校验，关键决定保留人工审核入口。
+
+检索使用本地记录索引、关键词排序和按 ID 读取；每个任务维护已观察引用，保存发现时验证出处。详见 [架构设计](docs/architecture.md)。
+
+## 接入模型与案件恢复
+
+完整开发环境：
 
 ```bash
-# 检查本地修订，临时构建并校验，备份后发布到唯一 baseline
-.venv/bin/python scripts/calibrate_dataset.py
-
-# 指定一个尚不存在的临时输出目录，并固定构建时间，便于逐字节复现
-.venv/bin/python scripts/calibrate_dataset.py --output /tmp/northstar-review-build --build-timestamp 2026-09-12T00:00:00Z
-
-.venv/bin/python -m unittest discover -s agent -p 'test_*.py'
-.venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
-.venv/bin/python scripts/validate_dataset.py
-.venv/bin/python data/regulatory-governance-dataset/scripts/validate_person1_data.py --root calibrated_v0_2 --strict --require-first-demo
-.venv/bin/python scripts/run_eval.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-重建检测到未经合并的 baseline 修改时会停止发布，保留当前文件；先在新目录生成、审查差异，并把应保留的修订纳入迁移规则。已有人工矩阵原样迁移，旧版本的确认不会静默批准新方法。
+模型配置参考 [.env.example](.env.example)。首次配置可从终端环境写入本地文件；该命令不覆盖已有配置，也不打印密钥：
 
-全部法规要求仍为 silver、待合资格人工审核；官方全文版本快照、真实操作证据和完整模型端到端评测尚未补齐。
+```bash
+# 先在当前终端设置 LLM_API_KEY
+python agent/configure_llm.py --from-env --provider openai --model gpt-5
+
+# 按账户限额设置请求预算；此命令产生模型 API 使用量
+python agent/run_case.py --db runs/live/cases.sqlite3 \
+  --max-model-calls 12 --max-seconds 180 \
+  --max-request-tokens 10000 --tokens-per-minute 10000 \
+  start --mode live
+```
+
+查询和续跑使用返回的案件 ID：
+
+```bash
+python agent/run_case.py --db runs/live/cases.sqlite3 show CASE_ID --audit
+python agent/run_case.py --db runs/live/cases.sqlite3 \
+  --max-model-calls 12 --max-seconds 180 \
+  --max-request-tokens 10000 --tokens-per-minute 10000 resume CASE_ID
+```
+
+Live 模式用于预算受控的模型调查和断点恢复；默认完整演示采用场景回放。OpenAI 与 Anthropic 兼容服务通过统一 adapter 接入，执行模式始终显式标记。用法与验证范围见 [开发说明](docs/development.md)。
+
+## 验证与提交
+
+```bash
+# 在已安装 requirements.txt 的环境中
+make check
+make package
+```
+
+`make check` 运行自动化测试、数据校验和完整场景演示。`make package` 生成 `dist/regulatory-change-to-action.zip`，附文件级 SHA-256 清单和压缩包校验值；本地配置、运行记录、虚拟环境及备份不进入提交包。最新执行结果见 [验证记录](docs/validation.md)。
+
+## 项目结构
+
+```text
+agent/              角色、工具、编排、检查点、案件存储及本地 JSON API
+scripts/            演示入口、数据校验、构建及提交打包
+calibrated_v0_2/     版本化机构与监管场景数据
+materials/esg_demo/  模拟业务答复和证据材料
+config/             方法配置与数据迁移记录
+docs/               架构、演示和开发说明
+examples/           可阅读的演示产物
+```
+
+## 数据与原型范围
+
+Northstar 是虚构银行，业务答复和演示证据均带模拟标记；bunq 仅作为公开同业参考。场景固定于 2026-09-08，保留原始数据快照日期。法规原文、候选解释和人工决定分别记录，关闭一项行动仅代表该项任务的审核结果。
+
+交付以 SME ESG 案件的 CLI 和本地 JSON API 为核心，采用人工审核的决策支持方式。原始项目要求见 [require.md](require.md)，数据字段和来源见 [数据字典](calibrated_v0_2/DATA_DICTIONARY.md) 与 [资料说明](docs/data-and-sources.md)。
